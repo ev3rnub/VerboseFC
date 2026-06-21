@@ -321,6 +321,16 @@ def main():
                         }
                         cat_filter = category_map.get(filter_category) if filter_category != "All" else None
                         
+                        # Set default parsed_info for metadata-only searches
+                        parsed_info = {
+                            'keywords': [],
+                            'phrases': [],
+                            'operators': {'and': [], 'or': [], 'not': []},
+                            'file_types': [],
+                            'size_range': (None, None),
+                            'dates': None
+                        }
+                        
                         try:
                             results, total = db.search_files_by_metadata(
                                 extension=filter_ext if filter_ext else None,
