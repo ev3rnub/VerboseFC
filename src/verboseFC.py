@@ -60,13 +60,22 @@ def process_single_file(file_path: pathlib.Path) -> Optional[Dict]:
 
 # --- Main App ---
 
+def get_resolved_path(path_str: str) -> pathlib.Path:
+    """Resolve a path string, handling ~ and relative paths."""
+    if not path_str:
+        return pathlib.Path.cwd()
+    # Expand ~ and environment variables
+    expanded = os.path.expanduser(os.path.expandvars(path_str))
+    # Convert to absolute path
+    return pathlib.Path(expanded).resolve()
+
 def main():
     st.set_page_config(page_title="File Discovery Dashboard", layout="wide")
     st.title("📂 File Discovery & Management")
 
     with st.sidebar:
         st.header("Settings")
-        target_path = st.text_input("Root Path", value=".")
+        target_path = st.text_input("Root Path", value="~")
         # Depth 1 = only root folder, Depth 2 = subfolders, etc.
         max_depth = st.slider("Max Recursion Depth", 1, 10, 2)
         workers = st.slider("Parallel Workers", 1, 16, 4)
@@ -76,7 +85,7 @@ def main():
         st.divider()
         st.subheader("Indexing Options")
         enable_indexing = st.checkbox("Enable Full Indexing", value=True, help="Extract content, timestamps, and categorize files")
-        index_path = st.text_input("Index Path", value=".")
+        index_path = st.text_input("Index Path", value="~")
         index_depth = st.slider("Index Depth", 1, 5, 2)
         index_workers = st.slider("Index Workers", 1, 8, 4)
         run_index = st.button("Build/Refresh Index", type="secondary")
@@ -103,11 +112,11 @@ def main():
 
     # --- Indexing Action ---
     if run_index and enable_indexing and db:
-        root = pathlib.Path(index_path)
+        root = get_resolved_path(index_path)
         if not root.exists():
             st.error(f"Index path '{index_path}' does not exist!")
         else:
-            st.info(f"Building index for {index_path} (Depth: {index_depth})...")
+            st.info(f"Building index for {root} (Depth: {index_depth})...")
             try:
                 progress_bar = st.progress(0)
                 status_text = st.empty()
@@ -116,7 +125,7 @@ def main():
                     progress_bar.progress(current / total)
                     status_text.text(f"Indexing: {filename}")
                 
-                stats = indexer.index_directory(index_path, max_depth=index_depth, workers=index_workers, progress_callback=progress_callback)
+                stats = indexer.index_directory(str(root), max_depth=index_depth, workers=index_workers, progress_callback=progress_callback)
                 
                 progress_bar.empty()
                 status_text.empty()
@@ -135,7 +144,7 @@ def main():
 
     # --- Scanning Action ---
     if run_scan:
-        root = pathlib.Path(target_path)
+        root = get_resolved_path(target_path)
         if not root.exists():
             st.error(f"Path '{target_path}' does not exist!")
             return
