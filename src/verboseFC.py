@@ -291,7 +291,11 @@ def main():
                         )
                 
                 # Execute search
-                if search_button or (search_query and 'search_results' not in st.session_state):
+                # Run search if: search button clicked OR (search query exists AND results not cached)
+                # Also run on initial page load if search query exists in session state
+                should_search = search_button or (search_query and 'search_results' not in st.session_state)
+                
+                if should_search:
                     results = []
                     total = 0
                     parsed_info = {}
@@ -353,15 +357,25 @@ def main():
                     st.session_state['parsed_info'] = parsed_info
                 
                 # Display results
-                if 'search_results' in st.session_state and st.session_state['search_results']:
+                if 'search_results' in st.session_state:
                     results_data = st.session_state['search_results']
                     results = results_data['results']
                     total = results_data['total']
                     execution_time = results_data['execution_time']
                     
-                    if results:
-                        # Search feedback
-                        st.success(f"Found {total} result(s) in {execution_time:.3f} seconds")
+                    # Check if search was actually performed (has query or filters)
+                    search_performed = search_query or filter_category != "All" or filter_ext or filter_min_size > 0 or filter_max_size > 0
+                    
+                    if search_performed:
+                        # Show search feedback if we have results
+                        if results:
+                            st.success(f"Found {total} result(s) in {execution_time:.3f} seconds")
+                        elif search_query:
+                            st.info(f"No results found for '{search_query}'")
+                        elif filter_category != "All":
+                            st.info(f"No results found for category: {filter_category}")
+                        else:
+                            st.info("No results found for the selected filters")
                         
                         # Show parsed query info
                         if 'parsed_info' in st.session_state and st.session_state['parsed_info']:
