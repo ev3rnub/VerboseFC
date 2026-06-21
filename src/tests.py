@@ -356,6 +356,7 @@ class TestSearchHistory(unittest.TestCase):
         recent = self.history.get_recent(10)
         self.assertEqual(len(recent), 1)
         self.assertEqual(recent[0]['query'], "test query")
+        self.assertEqual(recent[0]['result_count'], 5)
     
     def test_get_recent(self):
         """Test getting recent queries."""

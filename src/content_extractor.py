@@ -122,11 +122,32 @@ class ContentExtractor:
         # PowerPoint files
         if ext == '.pptx':
             try:
-                from docx import Document  # Using python-pptx would be better but we'll use basic approach
-                # Note: python-pptx is not in requirements yet, using alternative
-                return None, None
+                from pptx import Presentation
+                prs = Presentation(file_path)
+                slides = []
+                for slide in prs.slides:
+                    slide_text = []
+                    for shape in slide.shapes:
+                        if hasattr(shape, "text") and shape.text:
+                            slide_text.append(shape.text)
+                    if slide_text:
+                        slides.append(f"Slide {len(slides) + 1}:\n" + '\n'.join(slide_text))
+                content = '\n\n'.join(slides)
+                return content, self._get_preview(content)
             except Exception:
                 return None, None
+        
+        # Archive files
+        if ext in {'.zip', '.tar', '.gz', '.7z', '.rar'}:
+            # For .tar.gz, check the full extension
+            full_ext = ''.join(file_path.suffixes).lower()
+            if full_ext == '.tar.gz':
+                return self.extract_archive_content(file_path)
+            elif ext == '.gz':
+                # Not a tar.gz, skip
+                pass
+            else:
+                return self.extract_archive_content(file_path)
         
         # Email files
         if ext == '.eml':
@@ -174,6 +195,83 @@ class ContentExtractor:
                 pass
         
         # Other binary files - no content extraction
+        return None, None
+    
+    def extract_archive_content(self, file_path: Path) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Extract text content from archive files (.zip, .tar, .gz, .rar, .7z).
+        Returns (full_content, preview) or (None, None) if extraction fails.
+        """
+        import zipfile
+        import tarfile
+        
+        ext = file_path.suffix.lower()
+        
+        try:
+            if ext == '.zip':
+                with zipfile.ZipFile(file_path, 'r') as zf:
+                    files = []
+                    for info in zf.infolist():
+                        if not info.is_dir() and info.filename.endswith(('.txt', '.md', '.csv', '.json', '.xml', '.log')):
+                            try:
+                                content = zf.read(info).decode('utf-8', errors='replace')
+                                files.append(f"{info.filename}:\n{content[:1000]}")
+                            except Exception:
+                                continue
+                    full_content = '\n\n'.join(files)
+                    return full_content, self._get_preview(full_content)
+            
+            elif ext == '.tar':
+                with tarfile.open(file_path, 'r') as tf:
+                    files = []
+                    for member in tf.getmembers():
+                        if member.isfile() and member.name.endswith(('.txt', '.md', '.csv', '.json', '.xml', '.log')):
+                            try:
+                                f = tf.extractfile(member)
+                                if f:
+                                    content = f.read().decode('utf-8', errors='replace')
+                                    files.append(f"{member.name}:\n{content[:1000]}")
+                            except Exception:
+                                continue
+                    full_content = '\n\n'.join(files)
+                    return full_content, self._get_preview(full_content)
+            
+            elif ext == '.gz' and str(file_path).endswith('.tar.gz'):
+                with tarfile.open(file_path, 'r:gz') as tf:
+                    files = []
+                    for member in tf.getmembers():
+                        if member.isfile() and member.name.endswith(('.txt', '.md', '.csv', '.json', '.xml', '.log')):
+                            try:
+                                f = tf.extractfile(member)
+                                if f:
+                                    content = f.read().decode('utf-8', errors='replace')
+                                    files.append(f"{member.name}:\n{content[:1000]}")
+                            except Exception:
+                                continue
+                    full_content = '\n\n'.join(files)
+                    return full_content, self._get_preview(full_content)
+            
+            elif ext == '.7z':
+                try:
+                    import py7zr
+                    with py7zr.SevenZipFile(file_path, mode='r') as z:
+                        files = []
+                        for name, file in z.readall().items():
+                            if name.endswith(('.txt', '.md', '.csv', '.json', '.xml', '.log')):
+                                try:
+                                    content = file.read().decode('utf-8', errors='replace')
+                                    files.append(f"{name}:\n{content[:1000]}")
+                                except Exception:
+                                    continue
+                        full_content = '\n\n'.join(files)
+                        return full_content, self._get_preview(full_content)
+                except ImportError:
+                    # py7zr not installed, skip 7z files
+                    pass
+        
+        except Exception:
+            pass
+        
         return None, None
     
     def categorize_file(self, file_path: Path) -> str:

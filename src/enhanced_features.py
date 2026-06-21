@@ -39,14 +39,15 @@ class SearchHistory:
             CREATE TABLE IF NOT EXISTS search_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 query TEXT NOT NULL,
-                results_count INTEGER DEFAULT 0,
-                executed_at TEXT NOT NULL,
-                query_type TEXT DEFAULT 'fts'
+                timestamp TEXT NOT NULL,
+                result_count INTEGER DEFAULT 0,
+                category TEXT,
+                query_hash TEXT UNIQUE
             )
         ''')
         cursor.execute('''
-            CREATE INDEX IF NOT EXISTS idx_history_executed 
-            ON search_history(executed_at DESC)
+            CREATE INDEX IF NOT EXISTS idx_history_timestamp 
+            ON search_history(timestamp DESC)
         ''')
         self.db._get_connection().commit()
     
@@ -61,14 +62,14 @@ class SearchHistory:
         """
         cursor = self.db._get_connection().cursor()
         cursor.execute('''
-            INSERT INTO search_history (query, results_count, executed_at, query_type)
-            VALUES (?, ?, ?, ?)
-        ''', (query, results_count, datetime.now().isoformat(), query_type))
+            INSERT INTO search_history (query, timestamp, result_count, category, query_hash)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (query, datetime.now().isoformat(), results_count, query_type, hashlib.md5(query.encode()).hexdigest()))
         
         # Clean up old entries
         cursor.execute(f'''
             DELETE FROM search_history WHERE id NOT IN (
-                SELECT id FROM search_history ORDER BY executed_at DESC LIMIT {self.max_history}
+                SELECT id FROM search_history ORDER BY timestamp DESC LIMIT {self.max_history}
             )
         ''')
         
@@ -86,9 +87,9 @@ class SearchHistory:
         """
         cursor = self.db._get_connection().cursor()
         cursor.execute('''
-            SELECT id, query, results_count, executed_at, query_type
+            SELECT id, query, result_count, timestamp, category
             FROM search_history
-            ORDER BY executed_at DESC
+            ORDER BY timestamp DESC
             LIMIT ?
         ''', (limit,))
         
@@ -103,9 +104,9 @@ class SearchHistory:
         """
         cursor = self.db._get_connection().cursor()
         cursor.execute('''
-            SELECT id, query, results_count, executed_at, query_type
+            SELECT id, query, result_count, timestamp, category
             FROM search_history
-            ORDER BY executed_at DESC
+            ORDER BY timestamp DESC
         ''')
         
         return [dict(row) for row in cursor.fetchall()]
@@ -173,6 +174,12 @@ class IncrementalIndexer:
                 return hashlib.md5(f.read()).hexdigest()
         except Exception:
             return ''
+    
+    def get_all_file_paths(self) -> List[str]:
+        """Get all indexed file paths."""
+        cursor = self.db._get_connection().cursor()
+        cursor.execute('SELECT full_path FROM files')
+        return [row['full_path'] for row in cursor.fetchall()]
     
     def get_indexed_files(self) -> Dict[str, Dict]:
         """
@@ -442,15 +449,19 @@ class AdvancedSearch:
         for term in parsed['boolean_terms']['not']:
             terms.append(f'-{term}')
         
-        # Add keywords
-        for keyword in parsed['keywords']:
-            terms.append(keyword)
+        # Handle regex patterns (converted to FTS5 compatible format)
+        for pattern in parsed['regex_patterns']:
+            # FTS5 doesn't support full regex, but we can convert simple patterns
+            # Convert .* to * for prefix matching
+            fts_pattern = pattern.replace('.*', '*')
+            if fts_pattern:
+                terms.append(fts_pattern)
         
         return ' '.join(terms) if terms else ''
     
     def search(self, query: str, limit: int = 100, offset: int = 0) -> Tuple[List[Dict], int]:
         """
-        Execute advanced search with wildcards, phrases, and boolean operators.
+        Execute advanced search.
         
         Args:
             query: Advanced search query
@@ -463,415 +474,13 @@ class AdvancedSearch:
         parsed = self.parse_advanced_query(query)
         fts_query = self.build_advanced_fts_query(parsed)
         
-        if not fts_query:
-            return [], 0
+        if fts_query:
+            try:
+                return self.db.search_files(fts_query, limit, offset)
+            except Exception:
+                pass
         
-        try:
-            results, total = self.db.search_files(fts_query, limit, offset)
-            
-            # Apply regex filtering if present
-            if parsed['regex_patterns']:
-                filtered_results = []
-                for result in results:
-                    for pattern in parsed['regex_patterns']:
-                        try:
-                            if re.search(pattern, result.get('name', '') + ' ' + 
-                                        result.get('full_path', '') + ' ' + 
-                                        str(result.get('content_preview', ''))):
-                                filtered_results.append(result)
-                                break
-                        except re.error:
-                            pass
-                results = filtered_results
-                total = len(results)
-            
-            return results, total
-        except Exception as e:
-            return [], 0
-    
-    def search_by_regex(self, pattern: str, limit: int = 100, offset: int = 0) -> Tuple[List[Dict], int]:
-        """
-        Execute regex-based search.
-        
-        Args:
-            pattern: Regex pattern
-            limit: Maximum results
-            offset: Result offset
-            
-        Returns:
-            Tuple of (results, total_count)
-        """
-        try:
-            regex = re.compile(pattern, re.IGNORECASE)
-        except re.error as e:
-            return [], 0
-        
-        # Get all files and filter
-        all_files = self.db.get_all_files()
-        
-        results = []
-        for file in all_files:
-            text = (file.get('name', '') + ' ' + 
-                   file.get('full_path', '') + ' ' + 
-                   str(file.get('content_preview', '')))
-            if regex.search(text):
-                results.append(file)
-        
-        # Apply pagination
-        total = len(results)
-        results = results[offset:offset + limit]
-        
-        return results, total
-
-
-class SearchHistory:
-    """
-    Manages search history for users.
-    """
-    
-    def __init__(self, db: SearchDatabase, max_history: int = 50):
-        """
-        Initialize search history manager.
-        
-        Args:
-            db: SearchDatabase instance
-            max_history: Maximum number of history entries to keep
-        """
-        self.db = db
-        self.max_history = max_history
-        
-        # Create history table if not exists
-        self._create_history_table()
-    
-    def _create_history_table(self):
-        """Create search history table if it doesn't exist."""
-        cursor = self.db._get_connection().cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS search_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                query TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                result_count INTEGER DEFAULT 0,
-                category TEXT,
-                query_hash TEXT UNIQUE
-            )
-        ''')
-        cursor.execute('''
-            CREATE INDEX IF NOT EXISTS idx_history_timestamp 
-            ON search_history(timestamp DESC)
-        ''')
-        self.db._get_connection().commit()
-    
-    def add(self, query: str, result_count: int = 0, category: str = None):
-        """
-        Add a search query to history.
-        
-        Args:
-            query: Search query
-            result_count: Number of results returned
-            category: Optional category
-        """
-        timestamp = datetime.now().isoformat()
-        query_hash = hashlib.md5(query.encode()).hexdigest()
-        
-        cursor = self.db._get_connection().cursor()
-        
-        # Check if query already exists
-        cursor.execute('SELECT id FROM search_history WHERE query_hash = ?', (query_hash,))
-        existing = cursor.fetchone()
-        
-        if existing:
-            # Update timestamp for existing query
-            cursor.execute('''
-                UPDATE search_history SET timestamp = ? WHERE id = ?
-            ''', (timestamp, existing['id']))
-        else:
-            # Insert new query
-            cursor.execute('''
-                INSERT INTO search_history (query, timestamp, result_count, category, query_hash)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (query, timestamp, result_count, category, query_hash))
-        
-        # Clean up old entries
-        cursor.execute('''
-            DELETE FROM search_history WHERE id NOT IN (
-                SELECT id FROM search_history ORDER BY timestamp DESC LIMIT ?
-            )
-        ''', (self.max_history,))
-        
-        self.db._get_connection().commit()
-    
-    def get_recent(self, limit: int = 10) -> List[Dict]:
-        """
-        Get recent search history.
-        
-        Args:
-            limit: Maximum number of entries to return
-            
-        Returns:
-            List of history entries
-        """
-        cursor = self.db._get_connection().cursor()
-        cursor.execute('''
-            SELECT * FROM search_history 
-            ORDER BY timestamp DESC 
-            LIMIT ?
-        ''', (limit,))
-        
-        return [dict(row) for row in cursor.fetchall()]
-    
-    def get_all(self) -> List[Dict]:
-        """
-        Get all search history.
-        
-        Returns:
-            List of all history entries
-        """
-        cursor = self.db._get_connection().cursor()
-        cursor.execute('''
-            SELECT * FROM search_history 
-            ORDER BY timestamp DESC
-        ''')
-        
-        return [dict(row) for row in cursor.fetchall()]
-    
-    def clear(self):
-        """Clear all search history."""
-        cursor = self.db._get_connection().cursor()
-        cursor.execute('DELETE FROM search_history')
-        self.db._get_connection().commit()
-    
-    def delete_by_id(self, history_id: int) -> bool:
-        """
-        Delete a specific history entry.
-        
-        Args:
-            history_id: ID of the entry to delete
-            
-        Returns:
-            True if deleted
-        """
-        cursor = self.db._get_connection().cursor()
-        cursor.execute('DELETE FROM search_history WHERE id = ?', (history_id,))
-        deleted = cursor.rowcount > 0
-        self.db._get_connection().commit()
-        return deleted
-    
-    def get_popular_queries(self, limit: int = 5) -> List[Dict]:
-        """
-        Get most popular search queries.
-        
-        Args:
-            limit: Maximum number of queries to return
-            
-        Returns:
-            List of query dicts with count
-        """
-        cursor = self.db._get_connection().cursor()
-        cursor.execute('''
-            SELECT query, COUNT(*) as count, MAX(timestamp) as last_used
-            FROM search_history
-            GROUP BY query_hash
-            ORDER BY count DESC
-            LIMIT ?
-        ''', (limit,))
-        
-        return [dict(row) for row in cursor.fetchall()]
-    
-    def delete_query(self, query: str):
-        """
-        Delete a specific query from history.
-        
-        Args:
-            query: Search query to delete
-        """
-        query_hash = hashlib.md5(query.encode()).hexdigest()
-        cursor = self.db._get_connection().cursor()
-        cursor.execute('DELETE FROM search_history WHERE query_hash = ?', (query_hash,))
-        self.db._get_connection().commit()
-
-
-class IncrementalIndexer:
-    """
-    Handles incremental indexing for real-time updates.
-    """
-    
-    def __init__(self, db: SearchDatabase):
-        """
-        Initialize incremental indexer.
-        
-        Args:
-            db: SearchDatabase instance
-        """
-        self.db = db
-        
-        # Create version table if not exists
-        self._create_version_table()
-    
-    def _create_version_table(self):
-        """Create index version table if it doesn't exist."""
-        cursor = self.db._get_connection().cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS index_versions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                version INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                file_count INTEGER NOT NULL
-            )
-        ''')
-        cursor.execute('''
-            CREATE INDEX IF NOT EXISTS idx_versions_version 
-            ON index_versions(version DESC)
-        ''')
-        self.db._get_connection().commit()
-    
-    def get_current_version(self) -> int:
-        """Get current index version."""
-        cursor = self.db._get_connection().cursor()
-        cursor.execute('SELECT MAX(version) as version FROM index_versions')
-        result = cursor.fetchone()
-        return result['version'] if result and result['version'] else 0
-    
-    def get_file_hash(self, file_path: str) -> Optional[str]:
-        """Get stored hash for a file."""
-        cursor = self.db._get_connection().cursor()
-        cursor.execute('SELECT sha256 FROM files WHERE full_path = ?', (file_path,))
-        result = cursor.fetchone()
-        return result['sha256'] if result else None
-    
-    def get_all_file_paths(self) -> List[str]:
-        """Get all indexed file paths."""
-        cursor = self.db._get_connection().cursor()
-        cursor.execute('SELECT full_path FROM files')
-        return [row['full_path'] for row in cursor.fetchall()]
-    
-    def get_modified_since(self, timestamp: float) -> List[Dict]:
-        """Get files modified since a timestamp."""
-        cursor = self.db._get_connection().cursor()
-        cursor.execute('''
-            SELECT * FROM files WHERE modified_at_epoch >= ?
-            ORDER BY modified_at_epoch DESC
-        ''', (timestamp,))
-        return [dict(row) for row in cursor.fetchall()]
-    
-    def index_new_files(self, root_path: str, max_depth: int = 2, 
-                       workers: int = 4) -> Dict:
-        """
-        Index only new files (not already in index).
-        
-        Args:
-            root_path: Root directory to scan
-            max_depth: Maximum recursion depth
-            workers: Number of parallel workers
-            
-        Returns:
-            Statistics dict
-        """
-        from content_extractor import ContentExtractor
-        from indexer import FileIndexer
-        
-        existing_paths = set(self.get_all_file_paths())
-        
-        # Discover new files
-        root = Path(root_path)
-        new_files = []
-        
-        for path in root.rglob("*"):
-            if path.is_file():
-                try:
-                    relative_path = path.relative_to(root)
-                    depth = len(relative_path.parts)
-                    if depth <= max_depth:
-                        if str(path) not in existing_paths:
-                            new_files.append(path)
-                except ValueError:
-                    pass
-        
-        if not new_files:
-            return {'total': 0, 'indexed': 0, 'skipped': 0, 'errors': 0, 'content_extracted': 0}
-        
-        # Create temporary indexer
-        extractor = ContentExtractor()
-        indexer = FileIndexer(self.db, extractor)
-        
-        # Index new files
-        stats = indexer.index_directory(root_path, max_depth=max_depth, workers=workers)
-        
-        # Increment version
-        self._create_version(stats['indexed'])
-        
-        return stats
-    
-    def index_modified_files(self, root_path: str, max_depth: int = 2,
-                            workers: int = 4) -> Dict:
-        """
-        Index only modified files.
-        
-        Args:
-            root_path: Root directory to scan
-            max_depth: Maximum recursion depth
-            workers: Number of parallel workers
-            
-        Returns:
-            Statistics dict
-        """
-        from content_extractor import ContentExtractor
-        from indexer import FileIndexer
-        
-        # Get current timestamp
-        current_time = time.time()
-        
-        # Find modified files
-        modified_files = self.get_modified_since(current_time - 86400)  # Last 24 hours
-        
-        if not modified_files:
-            return {'total': 0, 'indexed': 0, 'skipped': 0, 'errors': 0, 'content_extracted': 0}
-        
-        # Re-index modified files
-        extractor = ContentExtractor()
-        indexer = FileIndexer(self.db, extractor)
-        
-        stats = indexer.index_directory(root_path, max_depth=max_depth, workers=workers)
-        
-        return stats
-    
-    def _create_version(self, file_count: int):
-        """Create a new index version."""
-        cursor = self.db._get_connection().cursor()
-        current_version = self.get_current_version()
-        
-        cursor.execute('''
-            INSERT INTO index_versions (version, created_at, file_count)
-            VALUES (?, ?, ?)
-        ''', (current_version + 1, datetime.now().isoformat(), file_count))
-        
-        self.db._get_connection().commit()
-    
-    def rollback_to_version(self, version: int) -> bool:
-        """
-        Rollback to a previous index version.
-        
-        Args:
-            version: Version to rollback to
-            
-        Returns:
-            True if successful
-        """
-        cursor = self.db._get_connection().cursor()
-        
-        # Get files from version
-        cursor.execute('''
-            SELECT id FROM index_versions WHERE version <= ?
-            ORDER BY version DESC LIMIT 1
-        ''', (version,))
-        
-        result = cursor.fetchone()
-        if not result:
-            return False
-        
-        # Note: This is a simplified rollback - in production, 
-        # you'd want to store full snapshots or use a more sophisticated approach
-        return True
+        return [], 0
 
 
 class SearchCache:
