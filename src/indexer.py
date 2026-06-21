@@ -212,7 +212,10 @@ class FileIndexer:
             return self._stats
         
         # Process files in parallel
-        if workers > 1:
+        # Note: Multiprocessing cannot be used with in-memory SQLite databases
+        # because thread-local connections cannot be pickled.
+        # Use single-threaded mode for in-memory databases.
+        if workers > 1 and self.db.db_path != ":memory:":
             with ProcessPoolExecutor(max_workers=workers) as executor:
                 future_to_file = {
                     executor.submit(self._process_single_file, f): f 
@@ -233,7 +236,7 @@ class FileIndexer:
                     if progress_callback:
                         progress_callback(i + 1, len(files_to_scan), str(future_to_file[future]))
         else:
-            # Single-threaded for testing/debugging
+            # Single-threaded for testing/debugging or in-memory databases
             for i, file_path in enumerate(files_to_scan):
                 file_data = self._process_single_file(file_path)
                 
