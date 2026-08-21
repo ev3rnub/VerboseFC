@@ -659,3 +659,110 @@ def create_incremental_indexer(db: SearchDatabase) -> IncrementalIndexer:
 def create_search_cache(db: SearchDatabase, max_size: int = 100, ttl: int = 300) -> SearchCache:
     """Create a search cache."""
     return SearchCache(db, max_size, ttl)
+
+
+class FullRollback:
+    """Full index rollback with snapshots."""
+    
+    def __init__(self, db: SearchDatabase):
+        self.db = db
+    
+    def create_snapshot(self, version_name: str) -> int:
+        """Create a full index snapshot."""
+        cursor = self.db._get_connection().cursor()
+        
+        # Create snapshot table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS index_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                version_name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                file_count INTEGER NOT NULL
+            )
+        ''')
+        
+        # Get current file count
+        cursor.execute('SELECT COUNT(*) FROM files')
+        file_count = cursor.fetchone()[0]
+        
+        # Create snapshot
+        cursor.execute('''
+            INSERT INTO index_snapshots (version_name, created_at, file_count)
+            VALUES (?, ?, ?)
+        ''', (version_name, datetime.now().isoformat(), file_count))
+        
+        snapshot_id = cursor.lastrowid
+        self.db._get_connection().commit()
+        
+        # Export current state
+        self._export_snapshot(snapshot_id)
+        
+        return snapshot_id
+    
+    def _export_snapshot(self, snapshot_id: int):
+        """Export current index state to snapshot."""
+        cursor = self.db._get_connection().cursor()
+        
+        # Create snapshot tables
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS snapshot_files_{} (
+                id INTEGER PRIMARY KEY,
+                name TEXT,
+                full_path TEXT,
+                size_bytes INTEGER,
+                md5 TEXT,
+                sha256 TEXT,
+                extension TEXT,
+                file_category TEXT
+            )
+        '''.format(snapshot_id))
+        
+        # Copy current data
+        cursor.execute('''
+            INSERT INTO snapshot_files_{} 
+            SELECT id, name, full_path, size_bytes, md5, sha256, extension, file_category 
+            FROM files
+        '''.format(snapshot_id))
+        
+        self.db._get_connection().commit()
+    
+    def rollback_to_snapshot(self, snapshot_id: int) -> bool:
+        """Rollback to a specific snapshot."""
+        cursor = self.db._get_connection().cursor()
+        
+        # Clear current index
+        cursor.execute('DELETE FROM content')
+        cursor.execute('DELETE FROM files')
+        
+        # Restore from snapshot
+        cursor.execute('''
+            INSERT INTO files 
+            SELECT id, name, full_path, size_bytes, md5, sha256, extension, file_category 
+            FROM snapshot_files_{}
+        '''.format(snapshot_id))
+        
+        # Update index state
+        cursor.execute('''
+            UPDATE index_state SET indexed_version = indexed_version + 1
+        ''')
+        
+        self.db._get_connection().commit()
+        return True
+    
+    def get_snapshots(self) -> List[Dict]:
+        """Get all snapshots."""
+        cursor = self.db._get_connection().cursor()
+        cursor.execute('''
+            SELECT id, version_name, created_at, file_count
+            FROM index_snapshots
+            ORDER BY created_at DESC
+        ''')
+        return [dict(row) for row in cursor.fetchall()]
+    
+    def delete_snapshot(self, snapshot_id: int) -> bool:
+        """Delete a snapshot."""
+        cursor = self.db._get_connection().cursor()
+        cursor.execute('DELETE FROM index_snapshots WHERE id = ?', (snapshot_id,))
+        deleted = cursor.rowcount > 0
+        self.db._get_connection().commit()
+        return deleted

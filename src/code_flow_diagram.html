@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Discovery Dashboard - Architecture & Code Flow</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 2rem;
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+            color: white;
+            padding: 2rem;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+        }
+        
+        .header p {
+            opacity: 0.9;
+            font-size: 1rem;
+        }
+        
+        .diagram-container {
+            padding: 2rem;
+        }
+        
+        .legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1rem;
+            margin-bottom: 2rem;
+            padding: 1rem;
+            background: #f8f9fa;
+            border-radius: 8px;
+            border: 1px solid #e9ecef;
+        }
+        
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .legend-box {
+            width: 20px;
+            height: 20px;
+            border-radius: 4px;
+        }
+        
+        .main-flow {
+            display: flex;
+            flex-direction: column;
+            gap: 2rem;
+        }
+        
+        .section {
+            background: white;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 1.5rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+        
+        .section-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: #2c3e50;
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 2px solid #667eea;
+        }
+        
+        .flow-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+        }
+        
+        .node {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 1rem;
+            border-radius: 8px;
+            text-align: center;
+            font-weight: 600;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            transition: transform 0.3s ease;
+        }
+        
+        .node:hover {
+            transform: translateY(-2px);
+        }
+        
+        .process-box {
+            background: white;
+            border: 2px solid #667eea;
+            border-radius: 8px;
+            padding: 1rem;
+            text-align: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+        
+        .data-layer {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+            padding: 1rem;
+            border-radius: 8px;
+            text-align: center;
+            font-weight: 600;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        
+        .arrow {
+            text-align: center;
+            font-size: 2rem;
+            color: #667eea;
+            padding: 0.5rem;
+        }
+        
+        .module-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+        }
+        
+        .module {
+            background: white;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            padding: 1rem;
+            text-align: center;
+            transition: all 0.3s ease;
+        }
+        
+        .module:hover {
+            border-color: #667eea;
+            box-shadow: 0 4px 8px rgba(102, 126, 234, 0.1);
+        }
+        
+        .module h4 {
+            color: #667eea;
+            margin-bottom: 0.5rem;
+        }
+        
+        .module p {
+            font-size: 0.85rem;
+            color: #666;
+        }
+        
+        .database-schema {
+            background: white;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 1.5rem;
+        }
+        
+        .table {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+        }
+        
+        .table-header {
+            background: #667eea;
+            color: white;
+            padding: 0.5rem;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+        
+        .table-row {
+            display: grid;
+            grid-template-columns: 1fr 2fr;
+            gap: 0.5rem;
+            padding: 0.5rem;
+            background: #f8f9fa;
+            border-radius: 4px;
+            font-size: 0.85rem;
+        }
+        
+        .flow-row {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+        
+        .flow-step {
+            flex: 1;
+            min-width: 150px;
+        }
+        
+        .callout {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 1rem;
+            margin: 1rem 0;
+            border-radius: 0 8px 8px 0;
+        }
+        
+        .tech-stack {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-top: 1rem;
+        }
+        
+        .tech-tag {
+            background: #667eea;
+            color: white;
+            padding: 0.25rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+        }
+        
+        @media (max-width: 768px) {
+            .flow-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .header h1 {
+                font-size: 1.5rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📂 File Discovery Dashboard</h1>
+            <p>Architecture & Code Flow Diagram</p>
+        </div>
+        
+        <div class="diagram-container">
+            <div class="legend">
+                <div class="legend-item">
+                    <div class="legend-box" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);"></div>
+                    <span>Main Application</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-box" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);"></div>
+                    <span>Database Layer</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-box" style="background: white; border: 2px solid #667eea;"></div>
+                    <span>Core Modules</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-box" style="background: #667eea; opacity: 0.2;"></div>
+                    <span>Enhanced Features</span>
+                </div>
+            </div>
+            
+            <div class="section">
+                <div class="section-title">1. Application Architecture Overview</div>
+                
+                <div class="flow-row">
+                    <div class="node">Streamlit UI</div>
+                    <div class="arrow">↓</div>
+                    <div class="process-box">
+                        <strong>verboseFC.py</strong><br>
+                        Main Application Entry Point
+                        <div class="tech-stack">
+                            <span class="tech-tag">Streamlit</span>
+                            <span class="tech-tag">Multi-threading</span>
+                            <span class="tech-tag">Multiprocessing</span>
+                        </div>
+                    </div>
+                    <div class="arrow">↓</div>
+                    <div class="node">Indexing Engine</div>
+                    <div class="arrow">↓</div>
+                    <div class="node">Search Engine</div>
+                    <div class="arrow">↓</div>
+                    <div class="node">Enhanced Features</div>
+                </div>
+            </div>
+            
+            <div class="section">
+                <div class="section-title">2. Core Module Dependencies</div>
+                
+                <div class="module-grid">
+                    <div class="module">
+                        <h4>content_extractor.py</h4>
+                        <p>File content extraction & categorization</p>
+                        <div class="tech-stack">
+                            <span class="tech-tag">PDF</span>
+                            <span class="tech-tag">DOCX</span>
+                            <span class="tech-tag">XLSX</span>
+                            <span class="tech-tag">Archive</span>
+                        </div>
+                    </div>
+                    
+                    <div class="module">
+                        <h4>db.py</h4>
+                        <p>SQLite database management & FTS5</p>
+                        <div class="tech-stack">
+                            <span class="tech-tag">SQLite</span>
+                            <span class="tech-tag">FTS5</span>
+                            <span class="tech-tag">Threading</span>
+                        </div>
+                    </div>
+                    
+                    <div class="module">
+                        <h4>indexer.py</h4>
+                        <p>File indexing pipeline</p>
+                        <div class="tech-stack">
+                            <span class="tech-tag">Parallel Processing</span>
+                            <span class="tech-tag">Hashing</span>
+                            <span class="tech-tag">Metadata</span>
+                        </div>
+                    </div>
+                    
+                    <div class="module">
+                        <h4>search_engine.py</h4>
+                        <p>Natural language search</p>
+                        <div class="tech-stack">
+                            <span class="tech-tag">FTS5</span>
+                            <span class="tech-tag">Query Parsing</span>
+                            <span class="tech-tag">Ranking</span>
+                        </div>
+                    </div>
+                    
+                    <div class="module">
+                        <h4>enhanced_features.py</h4>
+                        <p>Advanced search & caching</p>
+                        <div class="tech-stack">
+                            <span class="tech-tag">History</span>
+                            <span class="tech-tag">Caching</span>
+                            <span class="tech-tag">Incremental</span>
+                        </div>
+                    </div>
+                    
+                    <div class="module">
+                        <h4>ux_enhancements.py</h4>
+                        <p>Suggestions & feedback</p>
+                        <div class="tech-stack">
+                            <span class="tech-tag">Suggestions</span>
+                            <span class="tech-tag">Feedback</span>
+                            <span class="tech-tag">Visuals</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="section">
+                <div class="section-title">3. Main Application Flow</div>
+                
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem;">
+                    <div>
+                        <div class="process-box" style="background: #667eea; color: white;">
+                            <strong>Application Start</strong>
+                        </div>
+                        <div class="arrow">↓</div>
+                        <div class="process-box">
+                            <strong>UI Setup</strong><br>
+                            • Streamlit page config<br>
+                            • Sidebar configuration<br>
+                            • File scan & indexing options
+                        </div>
+                        <div class="arrow">↓</div>
+                        <div class="process-box">
+                            <strong>Database Init</strong><br>
+                            • SQLite connection<br>
+                            • FTS5 schema creation<br>
+                            • Index tables setup
+                        </div>
+                        <div class="arrow">↓</div>
+                        <div class="process-box">
+                            <strong>Module Initialization</strong><br>
+                            • ContentExtractor<br>
+                            • FileIndexer<br>
+                            • SearchEngine
+                        </div>
+                    </div>
+                    
+                    <div>
+                        <div class="process-box" style="background: #667eea; color: white;">
+                            <strong>Two Main Workflows</strong>
+                        </div>
+                        <div class="arrow">↓</div>
+                        
+                        <div class="process-box">
+                            <strong>📁 File Scanning</strong><br>
+                            • Recursive directory discovery<br>
+                            • Depth-limited traversal<br>
+                            • Parallel hashing (MD5/SHA256)<br>
+                            • System file filtering
+                        </div>
+                        <div class="arrow">↓</div>
+                        
+                        <div class="process-box">
+                            <strong>📊 Indexing</strong><br>
+                            • Content extraction<br>
+                            • File categorization<br>
+                            • Metadata collection<br>
+                            • FTS5 content indexing
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="arrow" style="margin: 2rem 0;">↓</div>
+                
+                <div class="process-box">
+                    <strong>Search Interface</strong>
+                    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-top: 1rem;">
+                        <div>
+                            <strong>Query Input</strong><br>
+                            Natural language search
+                        </div>
+                        <div>
+                            <strong>Query Parsing</strong><br>
+                            • Keywords<br>
+                            • Phrases<br>
+                            • Operators (AND/OR/NOT)<br>
+                            • Date/Size filters
+                        </div>
+                        <div>
+                            <strong>FTS5 Search</strong><br>
+                            • Full-text search<br>
+                            • BM25 ranking<br>
+                            • Metadata filtering
+                        </div>
+                        <div>
+                            <strong>Results Display</strong><br>
+                            • Pagination<br>
+                            • Highlighting<br>
+                            • Export options
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="section">
+                <div class="section-title">4. Database Schema & Data Flow</div>
+                
+                <div class="database-schema">
+                    <div class="table">
+                        <div class="table-header">Files Table</div>
+                        <div class="table-header">Content (FTS5)</div>
+                    </div>
+                    <div class="table">
+                        <div class="table-row">
+                            <div>id</div>
+                            <div>Primary key</div>
+                        </div>
+                        <div class="table-row">
+                            <div>name, full_path</div>
+                            <div>File identification</div>
+                        </div>
+                        <div class="table-row">
+                            <div>size_bytes, md5, sha256</div>
+                            <div>Size & hash verification</div>
+                        </div>
+                        <div class="table-row">
+                            <div>extension, file_category</div>
+                            <div>File classification</div>
+                        </div>
+                        <div class="table-row">
+                            <div>created_at, modified_at</div>
+                            <div>Timestamps (epoch)</div>
+                        </div>
+                        <div class="table-row">
+                            <div>content_available</div>
+                            <div>Content flag</div>
+                        </div>
+                        <div class="table-row">
+                            <div>file_id</div>
+                            <div>References files.id</div>
+                        </div>
+                        <div class="table-row">
+                            <div>preview, full_content</div>
+                            <div>FTS5 indexed text</div>
+                        </div>
+                    </div>
+                    
+                    <div class="callout">
+                        <strong>📝 Data Flow:</strong> Files are processed → Extracted content → Indexed with metadata → Stored in SQLite with FTS5 for fast search
+                    </div>
+                </div>
+            </div>
+            
+            <div class="section">
+                <div class="section-title">5. Enhanced Features Architecture</div>
+                
+                <div class="flow-row">
+                    <div class="process-box">
+                        <strong>Search History</strong><br>
+                        • Query tracking<br>
+                        • Recent queries<br>
+                        • History cleanup
+                    </div>
+                    <div class="arrow">↓</div>
+                    <div class="process-box">
+                        <strong>Incremental Indexer</strong><br>
+                        • Change detection<br>
+                        • Hash comparison<br>
+                        • Version management
+                    </div>
+                    <div class="arrow">↓</div>
+                    <div class="process-box">
+                        <strong>Search Cache</strong><br>
+                        • Query caching<br>
+                        • TTL expiration<br>
+                        • Cache management
+                    </div>
+                    <div class="arrow">↓</div>
+                    <div class="process-box">
+                        <strong>Advanced Search</strong><br>
+                        • Boolean operators<br>
+                        • Wildcards (*,?)<br>
+                        • Phrase search<br>
+                        • Regex patterns
+                    </div>
+                </div>
+                
+                <div class="flow-row" style="margin-top: 2rem;">
+                    <div class="process-box">
+                        <strong>Search Suggestions</strong><br>
+                        • Content-based<br>
+                        • History-based<br>
+                        • Popular terms
+                    </div>
+                    <div class="arrow">↓</div>
+                    <div class="process-box">
+                        <strong>Search Feedback</strong><br>
+                        • Execution time<br>
+                        • Result counts<br>
+                        • Refinement suggestions
+                    </div>
+                    <div class="arrow">↓</div>
+                    <div class="process-box">
+                        <strong>Visual Enhancements</strong><br>
+                        • Category icons<br>
+                        • Color coding<br>
+                        • Result cards
+                    </div>
+                </div>
+            </div>
+            
+            <div class="section">
+                <div class="section-title">6. Key Algorithms & Processes</div>
+                
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem;">
+                    <div class="process-box">
+                        <strong>📄 File Processing Pipeline</strong>
+                        <ol style="margin-top: 1rem; padding-left: 1.5rem;">
+                            <li>Discover files (recursive, depth-limited)</li>
+                            <li>Filter system files</li>
+                            <li>Compute hashes (MD5, SHA256)</li>
+                            <li>Extract metadata (size, timestamps)</li>
+                            <li>Categorize file type</li>
+                            <li>Extract text content</li>
+                            <li>Generate preview</li>
+                            <li>Store in database</li>
+                        </ol>
+                    </div>
+                    
+                    <div class="process-box">
+                        <strong>🔍 Search Query Processing</strong>
+                        <ol style="margin-top: 1rem; padding-left: 1.5rem;">
+                            <li>Parse natural language query</li>
+                            <li>Extract keywords & phrases</li>
+                            <li>Identify operators (AND/OR/NOT)</li>
+                            <li>Detect date/size filters</li>
+                            <li>Build FTS5 query string</li>
+                            <li>Execute search with ranking</li>
+                            <li>Apply metadata filters</li>
+                            <li>Return ranked results</li>
+                        </ol>
+                    </div>
+                    
+                    <div class="process-box">
+                        <strong>🔄 Incremental Indexing</strong>
+                        <ol style="margin-top: 1rem; padding-left: 1.5rem;">
+                            <li>Get current index state</li>
+                            <li>Scan file system</li>
+                            <li>Compute current file hashes</li>
+                            <li>Compare with stored hashes</li>
+                            <li>Identify new/modified files</li>
+                            <li>Index only changed files</li>
+                            <li>Update index state</li>
+                            <li>Create version snapshot</li>
+                        </ol>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="section">
+                <div class="section-title">7. Technology Stack Summary</div>
+                
+                <div class="module-grid">
+                    <div class="module">
+                        <h4>Frontend</h4>
+                        <div class="tech-stack">
+                            <span class="tech-tag">Streamlit</span>
+                            <span class="tech-tag">Pandas</span>
+                            <span class="tech-tag">HTML/CSS</span>
+                        </div>
+                    </div>
+                    
+                    <div class="module">
+                        <h4>Database</h4>
+                        <div class="tech-stack">
+                            <span class="tech-tag">SQLite</span>
+                            <span class="tech-tag">FTS5</span>
+                            <span class="tech-tag">Threading</span>
+                        </div>
+                    </div>
+                    
+                    <div class="module">
+                        <h4>Content Processing</h4>
+                        <div class="tech-stack">
+                            <span class="tech-tag">PyPDF2</span>
+                            <span class="tech-tag">python-docx</span>
+                            <span class="tech-tag">openpyxl</span>
+                            <span class="tech-tag">BeautifulSoup</span>
+                        </div>
+                    </div>
+                    
+                    <div class="module">
+                        <h4>Performance</h4>
+                        <div class="tech-stack">
+                            <span class="tech-tag">ProcessPoolExecutor</span>
+                            <span class="tech-tag">ThreadPoolExecutor</span>
+                            <span class="tech-tag">Caching</span>
+                            <span class="tech-tag">Parallel Processing</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="section">
+                <div class="section-title">8. System Architecture Diagram</div>
+                
+                <div style="background: white; border: 2px solid #e0e0e0; border-radius: 8px; padding: 2rem; position: relative;">
+                    <div style="text-align: center; margin-bottom: 2rem; font-weight: 600; color: #667eea;">
+                        SYSTEM ARCHITECTURE
+                    </div>
+                    
+                    <div style="display: flex; justify-content: center; align-items: center; gap: 2rem; flex-wrap: wrap;">
+                        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 1.5rem 2rem; border-radius: 12px; text-align: center; min-width: 150px;">
+                            <div style="font-size: 2rem; margin-bottom: 0.5rem;">👤</div>
+                            <strong>User Interface</strong>
+                        </div>
+                        
+                        <div style="background: #667eea; color: white; padding: 1.5rem 2rem; border-radius: 12px; text-align: center;">
+                            <div style="font-size: 2rem; margin-bottom: 0.5rem;">⚙️</div>
+                            <strong>Core Engine</strong>
+                        </div>
+                        
+                        <div style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: white; padding: 1.5rem 2rem; border-radius: 12px; text-align: center; min-width: 150px;">
+                            <div style="font-size: 2rem; margin-bottom: 0.5rem;">💾</div>
+                            <strong>Database</strong>
+                        </div>
+                    </div>
+                    
+                    <div style="display: flex; justify-content: center; align-items: center; gap: 1rem; margin-top: 2rem; flex-wrap: wrap;">
+                        <div style="background: white; border: 2px solid #667eea; color: #667eea; padding: 1rem 1.5rem; border-radius: 8px; text-align: center;">
+                            Content Extractor
+                        </div>
+                        <div style="background: white; border: 2px solid #667eea; color: #667eea; padding: 1rem 1.5rem; border-radius: 8px; text-align: center;">
+                            Indexer
+                        </div>
+                        <div style="background: white; border: 2px solid #667eea; color: #667eea; padding: 1rem 1.5rem; border-radius: 8px; text-align: center;">
+                            Search Engine
+                        </div>
+                    </div>
+                    
+                    <div style="display: flex; justify-content: center; align-items: center; gap: 1rem; margin-top: 2rem; flex-wrap: wrap;">
+                        <div style="background: #f8f9fa; border: 1px solid #e0e0e0; padding: 0.75rem 1rem; border-radius: 6px; text-align: center; min-width: 120px;">
+                            Search History
+                        </div>
+                        <div style="background: #f8f9fa; border: 1px solid #e0e0e0; padding: 0.75rem 1rem; border-radius: 6px; text-align: center; min-width: 120px;">
+                            Advanced Search
+                        </div>
+                        <div style="background: #f8f9fa; border: 1px solid #e0e0e0; padding: 0.75rem 1rem; border-radius: 6px; text-align: center; min-width: 120px;">
+                            Suggestions
+                        </div>
+                        <div style="background: #f8f9fa; border: 1px solid #e0e0e0; padding: 0.75rem 1rem; border-radius: 6px; text-align: center; min-width: 120px;">
+                            Visual Enhancements
+                        </div>
+                    </div>
+                    
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 2rem; padding: 0 2rem;">
+                        <div style="text-align: center;">
+                            <div style="font-size: 3rem; opacity: 0.3;">📁</div>
+                            <small style="color: #666;">File System</small>
+                        </div>
+                        
+                        <div style="text-align: center;">
+                            <div style="font-size: 3rem; opacity: 0.3;">🔍</div>
+                            <small style="color: #666;">Search Results</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

@@ -266,6 +266,50 @@ class FileIndexer:
         return self.index_directory(root_path, max_depth, workers)
 
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+class AsyncIndexer:
+    """Handle asynchronous indexing operations."""
+    
+    def __init__(self, db, extractor=None):
+        self.db = db
+        self.extractor = extractor or ContentExtractor()
+        self.executor = ThreadPoolExecutor(max_workers=4)
+        self._indexing_task = None
+    
+    async def index_directory_async(self, root_path: str, max_depth: int = 2) -> Dict:
+        """Index directory asynchronously."""
+        loop = asyncio.get_event_loop()
+        
+        # Run synchronous indexing in thread pool
+        indexer = FileIndexer(self.db, self.extractor)
+        stats = await loop.run_in_executor(
+            self.executor, 
+            indexer.index_directory, 
+            root_path, 
+            max_depth
+        )
+        
+        return stats
+    
+    async def index_file_async(self, file_path: str) -> Optional[int]:
+        """Index a single file asynchronously."""
+        loop = asyncio.get_event_loop()
+        indexer = FileIndexer(self.db, self.extractor)
+        file_id = await loop.run_in_executor(
+            self.executor,
+            indexer.index_file,
+            Path(file_path)
+        )
+        return file_id
+    
+    def cancel_indexing(self):
+        """Cancel ongoing indexing."""
+        if self._indexing_task:
+            self._indexing_task.cancel()
+
+
 # Convenience function for single-use scenarios
 def create_indexer(db_path: str = None, max_content_size: int = 10 * 1024 * 1024) -> FileIndexer:
     """Create an indexer with a database connection."""

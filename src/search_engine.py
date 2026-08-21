@@ -4,6 +4,8 @@ Handles search query processing, natural language parsing, and result retrieval.
 """
 
 import re
+import json
+import difflib
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 from db import SearchDatabase
@@ -67,6 +69,63 @@ class SearchEngine:
         self._search_history = None
         self._search_suggestions = None
         self._search_feedback = None
+        self._saved_searches = None
+    
+    class SavedSearches:
+        """Manage saved searches."""
+        
+        def __init__(self, db: SearchDatabase):
+            self.db = db
+            self._create_saved_searches_table()
+        
+        def _create_saved_searches_table(self):
+            """Create saved searches table."""
+            cursor = self.db._get_connection().cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS saved_searches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    query TEXT NOT NULL,
+                    filters TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    is_active INTEGER DEFAULT 1
+                )
+            ''')
+            self.db._get_connection().commit()
+        
+        def save_search(self, name: str, query: str, filters: Dict = None):
+            """Save a search configuration."""
+            cursor = self.db._get_connection().cursor()
+            cursor.execute('''
+                INSERT INTO saved_searches (name, query, filters)
+                VALUES (?, ?, ?)
+            ''', (name, query, json.dumps(filters) if filters else None))
+            self.db._get_connection().commit()
+        
+        def get_saved_searches(self) -> List[Dict]:
+            """Get all saved searches."""
+            cursor = self.db._get_connection().cursor()
+            cursor.execute('''
+                SELECT id, name, query, filters, created_at
+                FROM saved_searches
+                WHERE is_active = 1
+                ORDER BY created_at DESC
+            ''')
+            return [dict(row) for row in cursor.fetchall()]
+        
+        def delete_search(self, search_id: int) -> bool:
+            """Delete a saved search."""
+            cursor = self.db._get_connection().cursor()
+            cursor.execute('DELETE FROM saved_searches WHERE id = ?', (search_id,))
+            deleted = cursor.rowcount > 0
+            self.db._get_connection().commit()
+            return deleted
+    
+    def get_saved_searches(self) -> SavedSearches:
+        """Get saved searches manager."""
+        if self._saved_searches is None:
+            self._saved_searches = self.SavedSearches(self.db)
+        return self._saved_searches
     
     def get_search_history(self) -> 'SearchHistory':
         """Get or create search history manager."""
@@ -310,6 +369,66 @@ class SearchEngine:
         
         return filters
     
+    def _fuzzy_match_keywords(self, query_keywords: List[str], indexed_keywords: List[str], 
+                              threshold: float = 0.8) -> Dict[str, str]:
+        """Find fuzzy matches for keywords."""
+        matches = {}
+        for query_word in query_keywords:
+            for indexed_word in indexed_keywords:
+                if difflib.SequenceMatcher(None, query_word.lower(), indexed_word.lower()).ratio() >= threshold:
+                    matches[query_word] = indexed_word
+                    break
+        return matches
+    
+    def _apply_fuzzy_matching(self, parsed_query: Dict) -> Dict:
+        """Apply fuzzy matching to parsed query."""
+        # Get indexed vocabulary from database
+        try:
+            cursor = self.db._get_connection().cursor()
+            cursor.execute('SELECT DISTINCT name FROM content ORDER BY name LIMIT 1000')
+            indexed_words = [row[0] for row in cursor.fetchall()]
+            
+            # Find fuzzy matches for query keywords
+            query_words = parsed_query.get('keywords', [])
+            matches = self._fuzzy_match_keywords(query_words, indexed_words)
+            
+            # Update parsed query with matched terms
+            if matches:
+                parsed_query['fuzzy_matches'] = matches
+                # Add matched terms as new keywords
+                for query_word, matched_word in matches.items():
+                    if matched_word not in parsed_query['keywords']:
+                        parsed_query['keywords'].append(matched_word)
+        except Exception:
+            pass
+        
+        return parsed_query
+    
+    def _parse_proximity_search(self, query: str) -> Tuple[str, List[Dict]]:
+        """Parse proximity operators like 'near' and 'around'."""
+        proximity_pattern = r'(\w+)\s+(?:near|around)\s+(\d+)\s+(\w+)'
+        matches = re.findall(proximity_pattern, query, re.IGNORECASE)
+        
+        proximity_terms = []
+        for word1, distance, word2 in matches:
+            proximity_terms.append({
+                'word1': word1.lower(),
+                'word2': word2.lower(),
+                'distance': int(distance)
+            })
+        
+        # Replace proximity syntax with standard query
+        clean_query = re.sub(proximity_pattern, '', query, flags=re.IGNORECASE)
+        return clean_query, proximity_terms
+    
+    def _build_proximity_fts_query(self, proximity_terms: List[Dict]) -> str:
+        """Build FTS5 proximity query."""
+        # FTS5 supports NEAR operator for proximity search
+        queries = []
+        for term in proximity_terms:
+            queries.append(f'NEAR({term["word1"]} {term["word2"]} {term["distance"]})')
+        return ' '.join(queries)
+    
     def search(self, 
                query: str, 
                limit: int = 100, 
@@ -325,8 +444,23 @@ class SearchEngine:
         Returns:
             Tuple of (results, total_count, parsed_query_info)
         """
-        parsed = self.parse_query(query)
+        # Parse proximity search first
+        clean_query, proximity_terms = self._parse_proximity_search(query)
+        
+        parsed = self.parse_query(clean_query)
         fts_query = self.build_fts_query(parsed)
+        
+        # Apply fuzzy matching
+        parsed = self._apply_fuzzy_matching(parsed)
+        
+        # Add proximity terms to parsed query
+        if proximity_terms:
+            parsed['proximity_terms'] = proximity_terms
+            proximity_fts = self._build_proximity_fts_query(proximity_terms)
+            if fts_query:
+                fts_query = f'({fts_query}) AND ({proximity_fts})'
+            else:
+                fts_query = proximity_fts
         
         # Start with empty results
         results = []
