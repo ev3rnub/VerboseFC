@@ -64,6 +64,9 @@ class SearchHistory:
         cursor.execute('''
             INSERT INTO search_history (query, timestamp, result_count, category, query_hash)
             VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(query_hash) DO UPDATE SET
+                timestamp = excluded.timestamp,
+                result_count = excluded.result_count
         ''', (query, datetime.now().isoformat(), results_count, query_type, hashlib.md5(query.encode()).hexdigest()))
         
         # Clean up old entries
@@ -385,9 +388,12 @@ class AdvancedSearch:
         query_no_special = re.sub(phrase_pattern, '', query)
         query_no_special = re.sub(r'/[^/]+/', '', query_no_special)
         
-        # Find patterns with wildcards
-        wildcard_pattern = r'\b(\w*\*\w*|\w*\?\w+)\b'
+        # Find patterns with wildcards (trailing * or mid-term *)
+        # Pattern: word characters followed by * (trailing) or ? (mid-term)
+        wildcard_pattern = r'\b\w*[\*\?]|\w*\?\w*'
         wildcards = re.findall(wildcard_pattern, query_no_special)
+        # Filter out empty matches and keep only valid wildcards
+        wildcards = [w for w in wildcards if w and ('*' in w or '?' in w)]
         result['wildcards'] = wildcards
         
         # Remove wildcards from query
@@ -427,12 +433,16 @@ class AdvancedSearch:
         
         # Handle wildcards
         for wildcard in parsed['wildcards']:
-            # Convert * to FTS5 prefix search
-            fts_wildcard = wildcard.replace('*', ':')
-            if '?' in fts_wildcard:
-                # ? is not supported in FTS5, convert to *
-                fts_wildcard = fts_wildcard.replace('?', '*')
-            terms.append(fts_wildcard)
+            # FTS5 supports prefix queries with * (e.g., "rep*")
+            # Keep * as-is for prefix matching
+            # Note: FTS5 only supports trailing *, not mid-term wildcards
+            if '?' in wildcard:
+                # Mid-term ? not supported, skip or convert to * for prefix
+                fts_wildcard = wildcard.replace('?', '*')
+                terms.append(fts_wildcard)
+            else:
+                # Trailing * is fine for prefix search
+                terms.append(wildcard)
         
         # Handle boolean AND
         for term in parsed['boolean_terms']['and']:

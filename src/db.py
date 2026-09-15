@@ -30,6 +30,11 @@ class SearchDatabase:
         conn = self._get_connection()
         cursor = conn.cursor()
         
+        # Set busy timeout for concurrent access (without WAL to avoid locking issues)
+        cursor.execute('PRAGMA busy_timeout=10000')
+        # Note: Using default rollback journal mode for thread safety
+        # WAL mode can cause locking issues with multiple threads
+        
         # Files table - core file metadata
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS files (
@@ -301,6 +306,29 @@ class SearchDatabase:
             return dict(row)
         return None
     
+    def delete_file_by_path(self, full_path: str) -> bool:
+        """Delete a file record by full path and its FTS5 content."""
+        self._ensure_connection()
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        # Get file ID
+        cursor.execute('SELECT id FROM files WHERE full_path = ?', (full_path,))
+        row = cursor.fetchone()
+        if not row:
+            return False
+        
+        file_id = row['id']
+        
+        # Delete FTS5 content first
+        cursor.execute('DELETE FROM content WHERE file_id = ?', (file_id,))
+        
+        # Delete file record
+        cursor.execute('DELETE FROM files WHERE id = ?', (file_id,))
+        
+        conn.commit()
+        return cursor.rowcount > 0
+    
     def search_files(self, query: str, limit: int = 100, offset: int = 0) -> Tuple[List[Dict], int]:
         """
         Search files using FTS5.
@@ -310,13 +338,13 @@ class SearchDatabase:
         conn = self._get_connection()
         cursor = conn.cursor()
         
-        # FTS5 search - use bm25() for ranking
+        # FTS5 search - use bm25() for ranking (ASC = best matches first)
         cursor.execute('''
             SELECT f.*, content.rank
             FROM files f
             JOIN content ON f.id = content.file_id
             WHERE content MATCH ?
-            ORDER BY bm25(content) DESC
+            ORDER BY bm25(content) ASC
             LIMIT ? OFFSET ?
         ''', (query, limit, offset))
         
@@ -443,6 +471,11 @@ class SearchDatabase:
         cursor.execute('DELETE FROM content')
         cursor.execute('DELETE FROM tags')
         cursor.execute('DELETE FROM files')
+        cursor.execute('DELETE FROM search_history')
+        cursor.execute('DELETE FROM index_state')
+        cursor.execute('DELETE FROM index_versions')
+        cursor.execute('DELETE FROM search_cache')
+        cursor.execute('DELETE FROM search_suggestions')
         
         conn.commit()
     

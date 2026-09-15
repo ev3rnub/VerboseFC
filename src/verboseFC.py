@@ -105,10 +105,11 @@ def show_file_preview(file_data: Dict):
     # Add download button
     if file_data.get('content'):
         csv = file_data['content'].encode('utf-8')
+        file_id = file_data.get('id', 'file')
         st.download_button(
             "Download Content",
             csv,
-            f"content_{file_data['id']}.txt",
+            f"content_{file_id}.txt",
             "text/plain"
         )
 
@@ -144,9 +145,13 @@ def main():
     # Database initialization
     db = None
     if enable_indexing:
-        # Use in-memory database for this demo
-        db = SearchDatabase(":memory:")
+        # Use a temporary file-based database for true parallelism
+        import tempfile
+        import os
+        db_path = os.path.join(tempfile.gettempdir(), f"verboseFC_{os.getpid()}.db")
+        db = SearchDatabase(db_path)
         st.session_state['db'] = db
+        st.session_state['db_path'] = db_path
 
     # Indexer instance
     indexer = None
@@ -264,7 +269,7 @@ def main():
 
             with tab1:
                 st.subheader("All Files")
-                st.dataframe(df, use_container_width=True)
+                st.dataframe(df, width='stretch')
                 
                 csv = df.to_csv(index=False).encode('utf-8')
                 st.download_button("Download CSV Report", csv, "file_report.csv", "text/csv")
@@ -325,9 +330,17 @@ def main():
             # Search button and clear button
             col1, col2, col3 = st.columns([1, 1, 3])
             with col1:
-                search_button = st.button("🔍 Search", use_container_width=True)
+                search_button = st.button("🔍 Search", use_container_width=False, width='stretch')
             with col2:
-                clear_button = st.button("🗑️ Clear", use_container_width=True)
+                clear_button = st.button("🗑️ Clear", use_container_width=False, width='stretch')
+            
+            # Handle Clear button
+            if clear_button:
+                st.session_state.pop('search_input', None)
+                st.session_state.pop('search_results', None)
+                st.session_state.pop('parsed_info', None)
+                st.session_state.pop('current_page', None)
+                st.rerun()
             
             # Search filters (expandable section)
             with st.expander("🔍 Search Filters", expanded=False):
@@ -347,6 +360,9 @@ def main():
                     )
             
             # Execute search
+            # Initialize parsed_info for later use
+            if 'parsed_info' not in st.session_state:
+                st.session_state['parsed_info'] = {}
             should_search = search_button or (search_query and 'search_results' not in st.session_state)
             
             if should_search:
@@ -356,13 +372,16 @@ def main():
                 execution_time = 0.0
                 
                 if search_query:
-                    # Execute search using search engine
+                    # Execute search using search engine with pagination
                     import time
                     start_time = time.time()
                     
+                    # Calculate offset based on current page
+                    offset = (st.session_state.get('current_page', 1) - 1) * 20
+                    
                     try:
                         results, total, parsed_info = search_engine.search(
-                            search_query, limit=100, offset=0
+                            search_query, limit=20, offset=offset
                         )
                         execution_time = time.time() - start_time
                     except Exception as e:
@@ -446,16 +465,25 @@ def main():
                     # Pagination
                     page_size = 20
                     total_pages = (total + page_size - 1) // page_size
+                    # Use session state for current page, default to 1
+                    current_page = st.session_state.get('current_page', 1)
                     current_page = st.number_input(
-                        "Page", min_value=1, max_value=max(1, total_pages), value=1
+                        "Page", min_value=1, max_value=max(1, total_pages), value=current_page, key="page_input"
                     )
+                    st.session_state['current_page'] = current_page
                     
-                    start_idx = (current_page - 1) * page_size
+                    # Calculate offset based on current page
+                    offset = (current_page - 1) * page_size
+                    # Only fetch results for current page
+                    limit = page_size
+                    
+                    # Get page results
+                    start_idx = offset
                     end_idx = min(start_idx + page_size, total)
                     page_results = results[start_idx:end_idx]
                     
                     # Results display
-                    st.write(f"Showing {start_idx + 1}-{end_idx} of {total} results")
+                    st.write(f"Showing {offset + 1}-{end_idx} of {total} results")
                     
                     for i, result in enumerate(page_results):
                         # Create card for each result
@@ -627,6 +655,7 @@ def main():
                 st.divider()
                 st.info("File type icons:")
                 st.write("📄 Document | 🖼️ Image | 🎥 Video | 🔊 Audio | 📦 Archive | 💻 Code | 📊 Data | 📄 Other")
+
 
 if __name__ == "__main__":
     # Start main

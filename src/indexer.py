@@ -211,12 +211,12 @@ class FileIndexer:
         if not files_to_scan:
             return self._stats
         
-        # Process files in parallel
-        # Note: Multiprocessing cannot be used with in-memory SQLite databases
-        # because thread-local connections cannot be pickled.
-        # Use single-threaded mode for in-memory databases.
+        # Process files in parallel using ThreadPoolExecutor to avoid pickling issues
+        # SQLite writes are serialized by the database engine, so thread safety is maintained
+        from concurrent.futures import ThreadPoolExecutor
+        
         if workers > 1 and self.db.db_path != ":memory:":
-            with ProcessPoolExecutor(max_workers=workers) as executor:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
                 future_to_file = {
                     executor.submit(self._process_single_file, f): f 
                     for f in files_to_scan

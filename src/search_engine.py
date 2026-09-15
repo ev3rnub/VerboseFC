@@ -201,12 +201,14 @@ class SearchEngine:
         result['operators']['or'] = or_terms
         
         # Extract NOT terms (both NOT word and -word)
-        not_terms = re.findall(r'\bNOT\s+(\w+)|-(\w+)', query_no_phrases, re.IGNORECASE)
+        # Only treat -word as NOT when preceded by whitespace (to avoid hyphenated words)
+        not_terms = re.findall(r'\bNOT\s+(\w+)|(?<=\s)-(\w+)', query_no_phrases, re.IGNORECASE)
         result['operators']['not'] = [t[0] or t[1] for t in not_terms]
         
         # Remove operators from query
         query_clean = re.sub(r'\bAND\b|\bOR\b|\bNOT\b', '', query_no_phrases, flags=re.IGNORECASE)
-        query_clean = re.sub(r'-\w+', '', query_clean)
+        # Remove -word only when preceded by whitespace (NOT operator)
+        query_clean = re.sub(r'(?<=\s)-\w+', '', query_clean)
         
         # Extract date references
         date_match = re.search(r'(today|yesterday|last\s+week|last\s+month|this\s+week|this\s+month|this\s+year)', 
@@ -244,14 +246,14 @@ class SearchEngine:
                 query_clean = query_clean[:size_match.start()] + query_clean[size_match.end():]
         
         # Extract numeric size (e.g., ">10MB", "<100KB", "1GB")
-        size_numeric_match = re.search(r'(>|<|>=|<=)?\s*(\d+)\s*(KB|MB|GB|TB)?', query_clean, re.IGNORECASE)
+        # Only match when a unit is present or explicit operator (to avoid matching years, IDs)
+        size_numeric_match = re.search(r'(>|<|>=|<=)?\s*(\d+)\s*(KB|MB|GB|TB)', query_clean, re.IGNORECASE)
         if size_numeric_match and not size_match:
             size_val = int(size_numeric_match.group(2))
             size_unit = size_numeric_match.group(3)
-            if size_unit:
-                size_unit = size_unit.upper()
-                multipliers = {'KB': 1024, 'MB': 1024**2, 'GB': 1024**3, 'TB': 1024**4}
-                size_val *= multipliers[size_unit]
+            size_unit = size_unit.upper()
+            multipliers = {'KB': 1024, 'MB': 1024**2, 'GB': 1024**3, 'TB': 1024**4}
+            size_val *= multipliers[size_unit]
             
             operator = size_numeric_match.group(1) or ''
             if operator in ('>', '>='):
@@ -261,7 +263,7 @@ class SearchEngine:
             else:
                 # Exact match or range
                 result['size_range'] = (size_val, size_val)
-            query_clean = re.sub(r'(>|<|>=|<=)?\s*\d+\s*(KB|MB|GB|TB)?', '', query_clean, flags=re.IGNORECASE)
+            query_clean = re.sub(r'(>|<|>=|<=)?\s*\d+\s*(KB|MB|GB|TB)', '', query_clean, flags=re.IGNORECASE)
         
         # Extract file type references
         file_type_match = re.search(r'(pdf|word|excel|powerpoint|text|markdown|image|video|audio|code|document|archive)', 
@@ -382,11 +384,18 @@ class SearchEngine:
     
     def _apply_fuzzy_matching(self, parsed_query: Dict) -> Dict:
         """Apply fuzzy matching to parsed query."""
-        # Get indexed vocabulary from database
+        # Get indexed vocabulary from database (use file names and content previews)
         try:
             cursor = self.db._get_connection().cursor()
-            cursor.execute('SELECT DISTINCT name FROM content ORDER BY name LIMIT 1000')
+            # Get words from file names
+            cursor.execute('SELECT DISTINCT name FROM files ORDER BY name LIMIT 1000')
             indexed_words = [row[0] for row in cursor.fetchall()]
+            # Also get words from content previews
+            cursor.execute('SELECT DISTINCT content_preview FROM files WHERE content_preview IS NOT NULL LIMIT 500')
+            for row in cursor.fetchall():
+                preview_words = row[0].split()
+                indexed_words.extend(preview_words)
+            indexed_words = list(set(indexed_words))[:1000]  # Deduplicate and limit
             
             # Find fuzzy matches for query keywords
             query_words = parsed_query.get('keywords', [])
@@ -426,7 +435,8 @@ class SearchEngine:
         # FTS5 supports NEAR operator for proximity search
         queries = []
         for term in proximity_terms:
-            queries.append(f'NEAR({term["word1"]} {term["word2"]} {term["distance"]})')
+            # FTS5 syntax: NEAR(word1 word2, distance)
+            queries.append(f'NEAR({term["word1"]} {term["word2"]}, {term["distance"]})')
         return ' '.join(queries)
     
     def search(self, 
@@ -481,7 +491,33 @@ class SearchEngine:
         # Apply additional metadata filters if needed
         if metadata_filters:
             # If we have FTS results, filter them; otherwise do pure metadata search
-            if not results:
+            if results:
+                # Filter FTS results by metadata
+                filtered_results = []
+                for r in results:
+                    # Check size filter
+                    if metadata_filters.get('min_size') and r.get('size_bytes', 0) < metadata_filters['min_size']:
+                        continue
+                    if metadata_filters.get('max_size') and r.get('size_bytes', 0) > metadata_filters['max_size']:
+                        continue
+                    # Check date filter
+                    if metadata_filters.get('min_modified') and r.get('modified_at_epoch', 0) < metadata_filters['min_modified']:
+                        continue
+                    if metadata_filters.get('max_modified') and r.get('modified_at_epoch', 0) > metadata_filters['max_modified']:
+                        continue
+                    # Check category filter
+                    cat_filters = metadata_filters.get('file_categories', [])
+                    if cat_filters and r.get('file_category') not in cat_filters:
+                        continue
+                    # Check extension filter
+                    ext_filters = metadata_filters.get('extensions', [])
+                    if ext_filters and r.get('extension') not in ext_filters:
+                        continue
+                    filtered_results.append(r)
+                
+                results = filtered_results
+                total = len(results)
+            else:
                 # Pure metadata search
                 cat_filters = metadata_filters.get('file_categories', [])
                 ext_filters = metadata_filters.get('extensions', [])
@@ -536,10 +572,8 @@ class SearchEngine:
         except Exception:
             pass  # Don't fail if history tracking fails
         
-        # Apply pagination
-        paginated_results = results[offset:offset + limit]
-        
-        return paginated_results, total, parsed
+        # Return results (pagination already applied by DB)
+        return results, total, parsed
     
     def get_search_suggestions(self, 
                                prefix: str, 
