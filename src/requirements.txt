@@ -9,3 +9,4 @@ python-pptx>=0.6.23
 py7zr>=0.20.0
 rarfile>=4.0
 watchdog>=3.0.0
+send2trash>=1.8.0

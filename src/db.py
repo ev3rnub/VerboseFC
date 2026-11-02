@@ -4,6 +4,7 @@ Handles SQLite database creation and operations for the search index.
 """
 
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import threading
@@ -159,6 +160,23 @@ class SearchDatabase:
             ON search_suggestions(term)
         ''')
         
+        # Watch alerts table for folder-change monitoring dashboard
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS watch_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                path TEXT NOT NULL,
+                name TEXT NOT NULL,
+                watch_path TEXT,
+                acknowledged INTEGER DEFAULT 0
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_alerts_created
+            ON watch_alerts(created_at DESC)
+        ''')
+
         # Index for faster queries
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_files_path ON files(full_path)
@@ -479,6 +497,77 @@ class SearchDatabase:
         
         conn.commit()
     
+    # --- Watch alerts ---
+
+    def add_alert(self, event_type: str, path: str, name: str, watch_path: str = None) -> int:
+        """Record a folder-change alert. Returns the alert id."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO watch_alerts (created_at, event_type, path, name, watch_path)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (datetime.now().isoformat(timespec='seconds'), event_type, path, name, watch_path))
+        # Keep the table bounded
+        cursor.execute('''
+            DELETE FROM watch_alerts WHERE id NOT IN (
+                SELECT id FROM watch_alerts ORDER BY created_at DESC LIMIT 5000
+            )
+        ''')
+        conn.commit()
+        return cursor.lastrowid
+
+    def get_alerts(self, limit: int = 200, include_acknowledged: bool = True) -> List[Dict]:
+        """Retrieve recent watch alerts, newest first."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        query = 'SELECT * FROM watch_alerts'
+        if not include_acknowledged:
+            query += ' WHERE acknowledged = 0'
+        query += ' ORDER BY created_at DESC, id DESC LIMIT ?'
+        cursor.execute(query, (limit,))
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_unacknowledged_alert_count(self) -> int:
+        """Count alerts the user has not acknowledged yet."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) as count FROM watch_alerts WHERE acknowledged = 0')
+        return cursor.fetchone()['count']
+
+    def acknowledge_alert(self, alert_id: int) -> bool:
+        """Mark a single alert as acknowledged."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('UPDATE watch_alerts SET acknowledged = 1 WHERE id = ?', (alert_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def acknowledge_all_alerts(self) -> int:
+        """Mark all pending alerts as acknowledged. Returns count updated."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('UPDATE watch_alerts SET acknowledged = 1 WHERE acknowledged = 0')
+        conn.commit()
+        return cursor.rowcount
+
+    def clear_alerts(self) -> int:
+        """Delete all alerts. Returns count deleted."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM watch_alerts')
+        conn.commit()
+        return cursor.rowcount
+
+    def get_indexed_mtime(self, full_path: str) -> Optional[float]:
+        """Return the stored modified_at_epoch for a path, or None if not indexed."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT modified_at_epoch FROM files WHERE full_path = ?', (full_path,))
+        row = cursor.fetchone()
+        if row:
+            return row['modified_at_epoch']
+        return None
+
     def close(self):
         """Close all database connections."""
         if hasattr(self._local, 'connection') and self._local.connection:

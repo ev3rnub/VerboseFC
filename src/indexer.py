@@ -15,7 +15,8 @@ from db import SearchDatabase
 class FileIndexer:
     """Indexes files with metadata, content extraction, and database storage."""
     
-    def __init__(self, db: SearchDatabase, extractor: ContentExtractor = None, max_content_size: int = 10 * 1024 * 1024):
+    def __init__(self, db: SearchDatabase, extractor: ContentExtractor = None, max_content_size: int = 10 * 1024 * 1024,
+                 hash_md5: bool = True, hash_sha256: bool = True, fast_hash_mb: float = 0.0):
         """
         Initialize the indexer.
         
@@ -23,10 +24,16 @@ class FileIndexer:
             db: SearchDatabase instance for storing index
             extractor: ContentExtractor instance for text extraction
             max_content_size: Maximum file size to extract content from (default 10MB)
+            hash_md5: Compute MD5 hashes (False stores empty string)
+            hash_sha256: Compute SHA256 hashes (False stores empty string)
+            fast_hash_mb: If > 0, hash only the first N MB of each file
         """
         self.db = db
         self.extractor = extractor or ContentExtractor()
         self.max_content_size = max_content_size
+        self.hash_md5 = hash_md5
+        self.hash_sha256 = hash_sha256
+        self.fast_hash_mb = fast_hash_mb
         self._stats = {
             'total': 0,
             'indexed': 0,
@@ -58,18 +65,39 @@ class FileIndexer:
         return f"{size:.2f} TB"
     
     def _compute_hashes(self, file_path: str) -> Dict[str, str]:
-        """Computes MD5 and SHA256 hashes in chunks."""
+        """Computes the enabled hashes in chunks. Disabled hashes return ''."""
         import hashlib
-        md5_hash = hashlib.md5()
-        sha256_hash = hashlib.sha256()
+        md5_hash = hashlib.md5() if self.hash_md5 else None
+        sha256_hash = hashlib.sha256() if self.hash_sha256 else None
+        if md5_hash is None and sha256_hash is None:
+            return {"md5": "", "sha256": ""}
+        limit = int(self.fast_hash_mb * 1024 * 1024) if self.fast_hash_mb > 0 else None
         try:
             with open(file_path, "rb") as f:
-                for chunk in iter(lambda: f.read(4096), b""):
-                    md5_hash.update(chunk)
-                    sha256_hash.update(chunk)
-            return {"md5": md5_hash.hexdigest(), "sha256": sha256_hash.hexdigest()}
+                read = 0
+                while True:
+                    n = 4096
+                    if limit is not None:
+                        n = min(4096, limit - read)
+                        if n <= 0:
+                            break
+                    chunk = f.read(n)
+                    if not chunk:
+                        break
+                    if md5_hash is not None:
+                        md5_hash.update(chunk)
+                    if sha256_hash is not None:
+                        sha256_hash.update(chunk)
+                    read += len(chunk)
+            return {
+                "md5": md5_hash.hexdigest() if md5_hash is not None else "",
+                "sha256": sha256_hash.hexdigest() if sha256_hash is not None else ""
+            }
         except Exception:
-            return {"md5": "ERROR", "sha256": "ERROR"}
+            return {
+                "md5": "ERROR" if self.hash_md5 else "",
+                "sha256": "ERROR" if self.hash_sha256 else ""
+            }
     
     def _should_skip_file(self, file_path: Path) -> bool:
         """Check if file should be skipped based on various criteria."""
@@ -181,15 +209,6 @@ class FileIndexer:
         if not root.exists():
             raise ValueError(f"Path '{root_path}' does not exist!")
         
-        # Reset stats
-        self._stats = {
-            'total': 0,
-            'indexed': 0,
-            'skipped': 0,
-            'errors': 0,
-            'content_extracted': 0
-        }
-        
         # Discover files
         files_to_scan = []
         try:
@@ -206,23 +225,81 @@ class FileIndexer:
         except Exception as e:
             raise RuntimeError(f"Error scanning directory: {e}")
         
-        self._stats['total'] = len(files_to_scan)
+        return self.index_files(files_to_scan, workers=workers, progress_callback=progress_callback)
+
+    def index_files(self,
+                    file_paths: List[Path],
+                    workers: int = 4,
+                    progress_callback: Callable = None,
+                    should_stop: Callable = None,
+                    is_paused: Callable = None,
+                    skip_unchanged: bool = False) -> Dict:
+        """
+        Index a pre-discovered list of files (avoids re-walking the tree).
         
-        if not files_to_scan:
-            return self._stats
+        Args:
+            file_paths: Already-discovered file paths to index
+            workers: Number of parallel workers
+            progress_callback: Optional callback(progress, total, current_file)
+            should_stop: Optional callable returning True to abort (cancel)
+            is_paused: Optional callable returning True while paused
+            skip_unchanged: If True, skip files already indexed with the same mtime
         
-        # Process files in parallel using ThreadPoolExecutor to avoid pickling issues
-        # SQLite writes are serialized by the database engine, so thread safety is maintained
+        Returns:
+            Statistics dict with indexing results
+        """
         from concurrent.futures import ThreadPoolExecutor
         
-        if workers > 1 and self.db.db_path != ":memory:":
-            with ThreadPoolExecutor(max_workers=workers) as executor:
+        # Reset stats
+        self._stats = {
+            'total': 0,
+            'indexed': 0,
+            'skipped': 0,
+            'errors': 0,
+            'content_extracted': 0
+        }
+        
+        # Optionally skip files whose stored mtime matches the on-disk mtime
+        if skip_unchanged:
+            kept = []
+            for p in file_paths:
+                try:
+                    stored = self.db.get_indexed_mtime(str(p))
+                    if stored is not None and abs(stored - p.stat().st_mtime) < 1e-6:
+                        self._stats['skipped'] += 1
+                        continue
+                except Exception:
+                    pass
+                kept.append(p)
+            file_paths = kept
+        
+        self._stats['total'] = len(file_paths)
+        
+        if not file_paths:
+            return self._stats
+        
+        def _stopped():
+            return bool(should_stop and should_stop())
+        
+        def _wait_if_paused():
+            while is_paused and is_paused() and not _stopped():
+                time.sleep(0.25)
+        
+        # Process in batches so pause/cancel can take effect between batches
+        batch_size = max(16, workers * 16)
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+            i = 0
+            total = len(file_paths)
+            for start in range(0, total, batch_size):
+                _wait_if_paused()
+                if _stopped():
+                    break
+                batch = file_paths[start:start + batch_size]
                 future_to_file = {
-                    executor.submit(self._process_single_file, f): f 
-                    for f in files_to_scan
+                    executor.submit(self._process_single_file, f): f
+                    for f in batch
                 }
-                
-                for i, future in enumerate(as_completed(future_to_file)):
+                for future in as_completed(future_to_file):
                     file_data = future.result()
                     
                     if file_data:
@@ -233,23 +310,9 @@ class FileIndexer:
                     else:
                         self._stats['errors'] += 1
                     
+                    i += 1
                     if progress_callback:
-                        progress_callback(i + 1, len(files_to_scan), str(future_to_file[future]))
-        else:
-            # Single-threaded for testing/debugging or in-memory databases
-            for i, file_path in enumerate(files_to_scan):
-                file_data = self._process_single_file(file_path)
-                
-                if file_data:
-                    self.db.insert_file(file_data)
-                    self._stats['indexed'] += 1
-                    if file_data.get('content'):
-                        self._stats['content_extracted'] += 1
-                else:
-                    self._stats['errors'] += 1
-                
-                if progress_callback:
-                    progress_callback(i + 1, len(files_to_scan), str(file_path))
+                        progress_callback(i, total, str(future_to_file[future]))
         
         return self._stats
     
