@@ -17,25 +17,76 @@ A local file discovery, indexing, and search tool with a [Streamlit](https://str
 - Directory tree view, CSV report download
 - **Open** / **Reveal in Finder / Explorer** for any file (cross-platform)
 
-**Storage dashboard tab**
-- Total size, file count, largest file, most common type
-- Size and count by extension, top-10 largest files, files-by-month-modified charts
+**Storage dashboard tab** (two sub-tabs)
+- *Overview*: total size, file count, largest file, most common type;
+  size and count by extension, top-10 largest files, files-by-month-modified charts
+- *Disk Map*: interactive sunburst (TreeSize-style) of folder sizes built from
+  scan data — pick a folder under the chart (largest slices first) to redraw it
+  centered on that folder; Up / Root buttons to navigate back out; adjustable
+  ring depth (1–4); hover shows MB and % of parent
 
 **Watch dashboard tab** (real-time folder monitoring)
 - Add/remove folders to watch; start/stop monitoring (watchdog)
 - Alerts for created / modified / deleted / moved files, persisted in the index database
 - Unacknowledged alert count on the tab badge; acknowledge or clear alerts
 
-**Search tab**
-- Natural-language search over file names, extracted content, and metadata (SQLite FTS5)
-- Query parsing: keywords, "exact phrases", date keywords (`today`, `yesterday`, `last week`, `last month`), file-type and size hints
-- Filters: category, extension, min/max size, date range (Today / Yesterday / Last 7 days / Last 30 days)
-- Pagination, term highlighting, content previews, syntax-highlighted text previews, and inline **PDF preview**
-- **Open** / **Reveal in Finder / Explorer** buttons on every result
-- CSV / JSON export of results
-- Advanced search: Boolean (`AND` / `OR` / `NOT`), wildcards (`*`, `?`), phrase and regex (`/pattern/`) queries
-- Search history, search suggestions, popular terms, and search feedback/refinement tips
-- Index statistics
+**Search tab** (Splunk-style layout)
+- One query bar that accepts **plain keywords or a VPL pipeline** — the whole
+  page (results, timeline, field counts, drill-downs) runs through the VPL engine
+- **Expandable query bar** — the ▾ / ▴ handles grow and shrink the query field
+  for long pipelines (it's also drag-resizable from its bottom-right corner,
+  like Splunk's multiline search box)
+- **Time Range Picker**: Any time / Last hour / 24 hours / 7 days / Today /
+  Yesterday / 30 days / 90 days / This year / Custom date range — sits inline
+  left of the query bar, Search button on the right, all on one row; applies to
+  keyword and VPL searches alike
+- **Match bar** — "N of M files matched in X.XXs", like Splunk's event count
+- **Timeline** — matches bucketed by modified time (auto bucket width from
+  minutes to months), hover shows count
+- **Field sidebar** — *Selected Fields* (`ext`, `category`, `type`, `index`,
+  `sourcetype`) with value counts; click a value to append `| where ext=="pdf"`
+  and re-run (drill-down). *Interesting Fields* listed below
+- **Events tab** — compact result rows with `▸` expand (all fields, Open /
+  Reveal / remove-from-results, highlighted content preview), pagination, CSV export
+- **Statistics tab** — count/size metrics and `count by ext / category / type` charts
+- **Visualization tab** — bar (ext), pie (category), and size-vs-time scatter of the matches
+- **VPL stages** (Verbose Processing Language): `search` (FTS5: `"phrases"`, `prefix*`, `AND/OR/NOT`),
+  `where` (`ext==pdf`, `size>1mb`, `modified>7d`, `name contains "x"`),
+  `sort -size`, `head N`, `fields a, b`, `stats count|sum(size)|avg|min|max by <field>`
+- **VPL index reports** — `index list` (the index db + top-level roots with file
+  counts), `sourcetypes [N]` (distinct file types/extensions with counts),
+  `fieldsummary [N]` (available fields with distinct values and coverage %);
+  scope them with a preceding `search`/`where`, e.g. `error | sourcetypes`
+- **VPL ingestion commands** — configure the Ingestion tab from the query bar:
+  `index add <name> <path-prefix> [exts=pdf,log]`, `index rm <name>`,
+  `sourcetype add <name> [exts=…] [path=/logs/] [content="regex"]`,
+  `extract add <name> "regex(with (capture) group)" [sourcetype=text]`.
+  They apply immediately and re-derive every file (no re-scan needed)
+- **Saved & scheduled searches** — save any query (💾), give it a schedule
+  (5 min → daily); runs land in a **Scheduled Runs** inbox with result counts
+  and top matches, and the Search tab shows a badge for new runs. Schedules
+  fire while the app is open (background thread); for always-on, run
+  `python src/scheduled_runner.py` from cron/launchd
+- Search history expander — click a past query to re-run it
+
+**Ingestion tab** (Splunk-style data pipeline settings)
+- *Data Inputs & Indexes* — route indexed files into named **indexes** by path
+  prefix and/or extension whitelist. Every file lands in exactly one index;
+  unmatched files fall into the built-in `default` catch-all. Query with
+  `where index==<name>` or group with `stats count by index`
+- *Sourcetypes* — classify files with rules on extension, path fragment, or a
+  regex against the detected MIME type, applied in priority order; unmatched
+  files fall back to their category (`document`, `text`, …). Query with
+  `where sourcetype==<name>`
+- *Field Extractions* — regex with one capture group, run against each file's
+  indexed content (optionally limited to a sourcetype). Extracted fields become
+  first-class VPL fields: `where errkind==timeout`, `fields name, errkind`,
+  `stats count by errkind`. A field name that collides with a built-in
+  (`size`, `name`, …) is queried as `kv:<name>`
+- Rules apply immediately (add/delete re-derives all rows in place — no
+  filesystem re-scan) or via the **♻️ Apply & reindex all files** button; each
+  sub-tab shows live counts, and the Field Extractions tab includes a regex
+  tester against already-indexed content
 
 **Indexing pipeline**
 - Content extraction from text/code files plus PDF, DOCX, XLSX, PPTX, HTML, and more
@@ -67,6 +118,12 @@ Then, in the browser UI:
 ```
 src/
 ├── verboseFC.py          # Streamlit app: UI, tabs, scan controls
+├── search_page.py        # Splunk-style Search tab: query bar, time picker, timeline, field sidebar, tabs
+├── vpl_parser.py         # Mini VPL: parser + SQL translation + counts/timeline helpers
+├── ingestion.py          # IngestionStore — indexes, sourcetypes, field extractions + reindex
+├── ingestion_page.py     # Ingestion tab UI (data inputs, sourcetypes, field extractions)
+├── saved_searches.py     # SavedSearchStore + SchedulerThread — saved & scheduled searches
+├── scheduled_runner.py   # cron/launchd entry point for scheduled searches
 ├── scan_runner.py        # ScanController — background scan with pause/resume/cancel, hash options
 ├── db.py                 # SearchDatabase — SQLite schema, FTS5 ops, watch alerts
 ├── indexer.py            # FileIndexer — indexing pipeline (hash options, skip-unchanged, pause/cancel)
@@ -77,6 +134,9 @@ src/
 ├── file_actions.py       # Open/Reveal (Finder/Explorer), move-to-trash, backup-move
 ├── watcher.py            # FolderWatcher — watchdog multi-folder monitoring
 ├── test_integration.py   # Smoke/integration tests (run: python test_integration.py)
+├── test_vpl.py           # VPL language tests
+├── test_ingestion.py     # Ingestion (indexes/sourcetypes/extractions) tests
+├── test_saved.py         # Saved/scheduled search tests
 └── requirements.txt
 ```
 
@@ -92,7 +152,8 @@ src/
 
 ## Notes & limitations
 
-- Files larger than 10 MB are indexed by metadata only (content extraction is skipped).
+- Files larger than 10 MB are indexed by metadata only (content extraction is skipped) — field extractions therefore only see files whose content was extracted.
+- Ingestion rules (indexes, sourcetypes, extractions) live in the same database and apply to already-indexed files; they never touch the filesystem. `sourcetype add content="regex"` matches the detected MIME type (e.g. `text/plain`), not file content — use `extract add` for content-based rules.
 - The scan respects the max-depth setting; very large trees with a high depth can take a while — tune the **Parallel Workers** slider, enable **fast hashing**, or pause/cancel mid-scan.
 - Windows artifact files (`Thumbs.db`, `$desktop.ini`) and `.DS_Store` are skipped automatically.
 - The persistent index lives at `~/.verbosefc/verbosefc_index.db` (delete it to start clean). Watch alerts are stored in the same database and survive restarts.

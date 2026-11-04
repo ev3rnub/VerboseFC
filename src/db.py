@@ -465,6 +465,14 @@ class SearchDatabase:
         cursor.execute('SELECT COUNT(*) as count FROM files')
         return cursor.fetchone()['count']
     
+    def get_content_count(self) -> int:
+        """Number of files with extracted full-text content (FTS index)."""
+        self._ensure_connection()
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) as count FROM content')
+        return cursor.fetchone()['count']
+
     def delete_file(self, file_id: int) -> bool:
         """Delete a file record and its FTS5 content."""
         self._ensure_connection()

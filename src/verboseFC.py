@@ -3,11 +3,13 @@ import time
 import json
 import base64
 import tempfile
+from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -15,17 +17,120 @@ from content_extractor import ContentExtractor
 from db import SearchDatabase
 from indexer import FileIndexer
 from search_engine import SearchEngine, create_search_engine
-from enhanced_features import AdvancedSearch, SearchCache, IncrementalIndexer, SearchHistory
-from ux_enhancements import SearchSuggestions, SearchFeedback, VisualEnhancements
 from scan_runner import ScanController, get_human_size
 from file_actions import open_path, reveal_path, move_to_trash, backup_move
 from watcher import FolderWatcher
+from saved_searches import SavedSearchStore
+from search_page import render_search_tab
+from ingestion import IngestionStore
+from ingestion_page import render_ingestion_tab
 
 # --- Constants ---
 
 PERSISTENT_DB_PATH = Path.home() / ".verbosefc" / "verbosefc_index.db"
 FAST_HASH_LIMIT = 1024 * 1024  # first 1 MB when fast hashing is enabled
 MAX_PDF_PREVIEW_BYTES = 20 * 1024 * 1024
+DISKMAP_MAX_ROWS = 2000
+
+
+# --- Disk Map (sunburst) ---
+
+def render_disk_map(sdf: pd.DataFrame) -> None:
+    """Sunburst disk-usage map with drill-down, built from scan/index data."""
+    scan_root = str(st.session_state.get('scan_root', '')).rstrip('/\\')
+    if not scan_root:
+        st.info("Run a scan first — the Disk Map is built from scan results.")
+        return
+
+    cur = st.session_state.get('diskmap_path') or scan_root
+    if cur != scan_root and not cur.startswith(scan_root + os.sep):
+        cur = scan_root  # stale path from a previous scan
+
+    def under(p: str) -> bool:
+        return p == cur or p.startswith(cur + os.sep)
+
+    cur_files = sdf[sdf['full_path'].map(under)]
+    if cur_files.empty:
+        st.info("No indexed files under this folder.")
+        return
+
+    total_cur = int(cur_files['size_bytes'].sum())
+    cur_name = os.path.basename(cur) or cur
+
+    st.caption(f"📍 **{cur}**")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Folder size", get_human_size(total_cur))
+    m2.metric("Files", f"{len(cur_files):,}")
+
+    depth = st.slider("Rings to show", 1, 4, 2, key="diskmap_depth")
+
+    # Aggregate: files within the ring budget are leaves; deeper files roll
+    # up into a '(deeper…)' marker so every row stays a leaf (Plotly rule).
+    agg: Dict[tuple, int] = defaultdict(int)
+    child_sizes: Dict[str, int] = defaultdict(int)
+    for p, sz in zip(cur_files['full_path'], cur_files['size_bytes']):
+        parts = os.path.relpath(p, cur).split(os.sep)
+        child_sizes[parts[0]] += sz
+        if len(parts) <= depth:
+            agg[(cur_name,) + tuple(parts)] += sz
+        else:
+            agg[(cur_name,) + tuple(parts[:depth]) + ('(deeper…)',)] += sz
+    m3.metric("Subfolders", len(child_sizes))
+
+    # File/dir name collision: a leaf tuple that is a prefix of a bucket tuple
+    for bucket in [t for t in agg if t[-1] == '(deeper…)']:
+        for leaf in [t for t in agg if t[-1] != '(deeper…)']:
+            if len(leaf) < len(bucket) and bucket[:len(leaf)] == leaf:
+                agg[leaf[:-1] + (leaf[-1] + ' ·file',)] = agg.pop(leaf)
+
+    # Cap rows for fast rendering; the tail becomes one '(rest)' slice
+    if len(agg) > DISKMAP_MAX_ROWS:
+        items = sorted(agg.items(), key=lambda kv: -kv[1])
+        agg = dict(items[:DISKMAP_MAX_ROWS - 1])
+        rest = sum(v for _, v in items[DISKMAP_MAX_ROWS - 1:])
+        agg[(cur_name, f"(rest: {len(items) - DISKMAP_MAX_ROWS + 1} more)")] = rest
+
+    # Trim path columns to the deepest actual tuple — an all-empty column
+    # crashes Plotly's hierarchy builder.
+    max_len = max(len(t) for t in agg)
+    rows = [{f"L{i + 1}": (t[i] if i < len(t) else None) for i in range(max_len)}
+            | {'size_mb': v / (1024 * 1024)} for t, v in agg.items()]
+    fig = px.sunburst(pd.DataFrame(rows), path=[f"L{i + 1}" for i in range(max_len)],
+                      values='size_mb')
+    # NOTE: sunburst hovertemplate only supports label/value/percent/currentPath —
+    # percentParent is textinfo-only and would render the tooltip blank.
+    fig.update_traces(textinfo='label+percent parent', insidetextorientation='radial',
+                      hovertemplate='<b>%{label}</b><br>%{value:,.2f} MB'
+                                    '<br>%{percent} of parent<extra></extra>',
+                      hoverlabel=dict(bgcolor='rgba(30, 33, 48, 0.95)',
+                                      bordercolor='#6c7a9c', font=dict(size=18, color='white')))
+    fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=640,
+                      hoverlabel=dict(font=dict(size=18)))
+    st.plotly_chart(fig, width='stretch')
+
+    # Drill controls (Streamlit cannot capture clicks on the chart itself)
+    children = sorted(child_sizes.items(), key=lambda kv: -kv[1])[:30]
+    c1, c2, c3 = st.columns([3, 1.2, 1.2])
+    with c1:
+        choice = st.selectbox("Drill into folder (largest first)",
+                              ["— stay here —"] + [n for n, _ in children],
+                              key="diskmap_drill")
+    with c2:
+        st.write("")
+        st.write("")
+        if st.button("⬅ Up one level", disabled=(cur == scan_root), width='stretch'):
+            st.session_state['diskmap_path'] = os.path.dirname(cur) or scan_root
+            st.rerun()
+    with c3:
+        st.write("")
+        st.write("")
+        if st.button("🏠 Root", disabled=(cur == scan_root), width='stretch'):
+            st.session_state['diskmap_path'] = scan_root
+            st.rerun()
+    if choice != "— stay here —":
+        st.session_state['diskmap_path'] = os.path.join(cur, choice)
+        del st.session_state['diskmap_drill']  # avoid re-drilling on rerun
+        st.rerun()
 
 
 # --- Utility Functions ---
@@ -114,28 +219,6 @@ def get_resolved_path(path_str: str) -> Path:
         return Path.cwd()
     expanded = os.path.expanduser(os.path.expandvars(path_str))
     return Path(expanded).resolve()
-
-def date_range_bounds(choice: str):
-    """Map the Date Range filter to (min_epoch, max_epoch) or (None, None)."""
-    if choice == "Any time":
-        return None, None
-    now = datetime.now()
-    if choice == "Today":
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = now
-    elif choice == "Yesterday":
-        start = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        end = (now - timedelta(days=1)).replace(hour=23, minute=59, second=59, microsecond=999999)
-    elif choice == "Last 7 days":
-        start = now - timedelta(days=7)
-        end = now
-    elif choice == "Last 30 days":
-        start = now - timedelta(days=30)
-        end = now
-    else:
-        return None, None
-    return start.timestamp(), end.timestamp()
-
 
 # --- Main App ---
 
@@ -276,12 +359,28 @@ def main():
     # --- Main UI Tabs ---
     pending_alerts = db.get_unacknowledged_alert_count()
     alert_label = f"👀 Watch ({pending_alerts})" if pending_alerts else "👀 Watch"
-    main_tab1, main_tab2, main_tab3, main_tab4 = st.tabs(
-        ["📁 File Explorer", "🔍 Search", "📊 Storage", alert_label]
+    saved_store = SavedSearchStore(db)
+    st.session_state['saved_store'] = saved_store
+    new_runs = saved_store.unseen_runs(st.session_state.get('sched_seen_id', 0))
+    search_label = f"🔍 Search ({new_runs})" if new_runs else "🔍 Search"
+    ingest_store = IngestionStore(db)
+    st.session_state['ingest_store'] = ingest_store
+    main_tab1, main_tab2, main_tab3, main_tab4, main_tab5 = st.tabs(
+        ["📁 File Explorer", search_label, "📥 Ingestion", "📊 Storage", alert_label]
     )
 
     # ==================== FILE EXPLORER ====================
     with main_tab1:
+        if 'scan_results' not in st.session_state and db.get_file_count():
+            # Fresh launch with a populated index: show the saved index
+            # instead of an empty screen (the Storage tab already reads it).
+            rows = db.get_all_files()
+            st.session_state['scan_results'] = pd.DataFrame(rows)
+            try:
+                st.session_state['scan_root'] = Path(os.path.commonpath(
+                    [r['full_path'] for r in rows]))
+            except ValueError:
+                pass  # mixed drives (Windows); Tree tab falls back to cwd
         if 'scan_results' in st.session_state:
             df = st.session_state['scan_results']
             root = st.session_state.get('scan_root', Path.cwd())
@@ -448,350 +547,15 @@ def main():
 
     # ==================== SEARCH ====================
     with main_tab2:
-        st.subheader("🔍 Natural Language Search")
+        render_search_tab(db, search_engine, saved_store)
 
-        if not enable_indexing or not db:
-            st.info("Enable indexing in the sidebar to use search functionality.")
-        else:
-            search_query = st.text_input(
-                "Search files by name, content, or metadata...",
-                placeholder="Search files by name, content, or metadata...",
-                key="search_input"
-            )
-
-            col1, col2, col3 = st.columns([1, 1, 3])
-            with col1:
-                search_button = st.button("🔍 Search", use_container_width=False, width='stretch')
-            with col2:
-                clear_button = st.button("🗑️ Clear", use_container_width=False, width='stretch')
-
-            if clear_button:
-                st.session_state.pop('search_input', None)
-                st.session_state.pop('search_results', None)
-                st.session_state.pop('parsed_info', None)
-                st.session_state.pop('current_page', None)
-                st.rerun()
-
-            with st.expander("🔍 Search Filters", expanded=False):
-                col1, col2 = st.columns(2)
-                with col1:
-                    filter_category = st.selectbox(
-                        "File Category",
-                        ["All"] + ["Document", "Image", "Video", "Audio", "Archive", "Code", "Data"]
-                    )
-                    filter_ext = st.text_input("Extension (e.g., .pdf, .txt)")
-                    filter_min_size = st.number_input("Min Size (bytes)", min_value=0, value=0)
-                with col2:
-                    filter_max_size = st.number_input("Max Size (bytes)", min_value=0, value=0)
-                    filter_date_range = st.selectbox(
-                        "Date Range",
-                        ["Any time", "Today", "Yesterday", "Last 7 days", "Last 30 days"]
-                    )
-
-            if 'parsed_info' not in st.session_state:
-                st.session_state['parsed_info'] = {}
-            should_search = search_button or (search_query and 'search_results' not in st.session_state)
-
-            if should_search:
-                results = []
-                total = 0
-                parsed_info = {}
-                execution_time = 0.0
-
-                if search_query:
-                    import time as _time
-                    start_time = _time.time()
-                    offset = (st.session_state.get('current_page', 1) - 1) * 20
-                    try:
-                        results, total, parsed_info = search_engine.search(
-                            search_query, limit=20, offset=offset
-                        )
-                        execution_time = _time.time() - start_time
-                    except Exception as e:
-                        st.error(f"Search error: {e}")
-                        import traceback
-                        st.error(traceback.format_exc())
-                        results = []
-                        total = 0
-                else:
-                    category_map = {
-                        "Document": "document", "Image": "image", "Video": "video",
-                        "Audio": "audio", "Archive": "archive", "Code": "code", "Data": "data"
-                    }
-                    cat_filter = category_map.get(filter_category) if filter_category != "All" else None
-                    min_mod, max_mod = date_range_bounds(filter_date_range)
-
-                    parsed_info = {
-                        'keywords': [],
-                        'phrases': [],
-                        'operators': {'and': [], 'or': [], 'not': []},
-                        'file_types': [],
-                        'size_range': (None, None),
-                        'dates': (min_mod, max_mod)
-                    }
-
-                    try:
-                        results, total = db.search_files_by_metadata(
-                            extension=filter_ext if filter_ext else None,
-                            file_category=cat_filter,
-                            min_size=filter_min_size if filter_min_size > 0 else None,
-                            max_size=filter_max_size if filter_max_size > 0 else None,
-                            min_modified=min_mod,
-                            max_modified=max_mod
-                        )
-                    except Exception as e:
-                        st.error(f"Search error: {e}")
-                        results = []
-                        total = 0
-
-                st.session_state['search_results'] = {
-                    'results': results,
-                    'total': total,
-                    'execution_time': execution_time,
-                    'query': search_query
-                }
-                st.session_state['parsed_info'] = parsed_info
-
-            if 'search_results' in st.session_state:
-                results_data = st.session_state['search_results']
-                results = results_data['results']
-                total = results_data['total']
-                execution_time = results_data['execution_time']
-
-                search_performed = search_query or filter_category != "All" or filter_ext or filter_min_size > 0 or filter_max_size > 0 or filter_date_range != "Any time"
-
-                if search_performed:
-                    if results:
-                        st.success(f"Found {total} result(s) in {execution_time:.3f} seconds")
-                    elif search_query:
-                        st.info(f"No results found for '{search_query}'")
-                    elif filter_category != "All":
-                        st.info(f"No results found for category: {filter_category}")
-                    else:
-                        st.info("No results found for the selected filters")
-
-                    if 'parsed_info' in st.session_state and st.session_state['parsed_info']:
-                        with st.expander("🔍 Query Analysis", expanded=False):
-                            parsed = st.session_state['parsed_info']
-                            st.json({
-                                'keywords': parsed.get('keywords', []),
-                                'phrases': parsed.get('phrases', []),
-                                'operators': parsed.get('operators', {}),
-                                'file_types': parsed.get('file_types', []),
-                                'size_range': parsed.get('size_range', [])
-                            })
-
-                    page_size = 20
-                    total_pages = (total + page_size - 1) // page_size
-                    current_page = st.session_state.get('current_page', 1)
-                    current_page = st.number_input(
-                        "Page", min_value=1, max_value=max(1, total_pages), value=current_page, key="page_input"
-                    )
-                    st.session_state['current_page'] = current_page
-
-                    offset = (current_page - 1) * page_size
-                    start_idx = offset
-                    end_idx = min(start_idx + page_size, total)
-                    page_results = results[start_idx:end_idx]
-
-                    st.write(f"Showing {offset + 1}-{end_idx} of {total} results")
-
-                    for i, result in enumerate(page_results):
-                        col1, col2 = st.columns([3, 1])
-                        with col1:
-                            st.write(f"**📄 {result['name']}**")
-                            st.write(f"*{result['full_path']}*")
-                            st.write(f"Type: {result['file_type']} | Size: {result['size_human']}")
-                            if result.get('content_preview'):
-                                preview = result['content_preview']
-                                if search_query:
-                                    terms = parsed_info.get('keywords', [])
-                                    if terms:
-                                        for term in terms:
-                                            preview = preview.replace(term, f"**{term}**")
-                                st.caption(f"Preview: {preview[:200]}...")
-                        with col2:
-                            st.write(f"Modified: {result.get('modified_at', 'N/A')}")
-                            st.write(f"Category: {result.get('file_category', 'N/A')}")
-                            if result.get('content_available'):
-                                st.write("✅ Content indexed")
-
-                        # Per-result actions
-                        acol1, acol2, acol3 = st.columns([1, 1, 4])
-                        with acol1:
-                            if st.button("📂 Open", key=f"open_{result.get('id', i)}", width='stretch'):
-                                try:
-                                    open_path(result['full_path'])
-                                except Exception as e:
-                                    st.error(f"Could not open: {e}")
-                        with acol2:
-                            if st.button("📍 Reveal", key=f"reveal_{result.get('id', i)}", width='stretch'):
-                                try:
-                                    reveal_path(result['full_path'])
-                                except Exception as e:
-                                    st.error(f"Could not reveal: {e}")
-                        with acol3:
-                            if st.button("👁 Preview", key=f"prev_{result.get('id', i)}", width='stretch'):
-                                st.session_state['preview_target'] = result
-                        st.divider()
-
-                    # Inline preview for the selected result
-                    if 'preview_target' in st.session_state:
-                        target = st.session_state['preview_target']
-                        full = target.get('full_path', '')
-                        if full and os.path.exists(full):
-                            with st.expander(f"👁 Preview: {target['name']}", expanded=True):
-                                if full.lower().endswith('.pdf'):
-                                    show_pdf_preview(full)
-                                # Text preview from the index, if any
-                                row = db.get_file_by_id(target['id']) if target.get('id') else None
-                                if row and row.get('content_available'):
-                                    st.text((row.get('content_preview') or '')[:5000])
-                                elif not full.lower().endswith('.pdf'):
-                                    st.info("No indexed content for this file.")
-                        else:
-                            st.warning("File no longer exists on disk.")
-
-                    if total_pages > 1:
-                        col1, col2, col3 = st.columns([1, 2, 1])
-                        with col1:
-                            if current_page > 1:
-                                if st.button("⬅️ Previous", key="prev_page"):
-                                    st.session_state['current_page'] = current_page - 1
-                                    st.rerun()
-                        with col2:
-                            st.write(f"Page {current_page} of {total_pages}")
-                        with col3:
-                            if current_page < total_pages:
-                                if st.button("➡️ Next", key="next_page"):
-                                    st.session_state['current_page'] = current_page + 1
-                                    st.rerun()
-
-                    if results:
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            csv = export_results_csv(results)
-                            st.download_button(
-                                "📥 Export Results (CSV)",
-                                csv,
-                                "search_results.csv",
-                                "text/csv"
-                            )
-                        with col2:
-                            json_data = export_results_json(results)
-                            st.download_button(
-                                "📥 Export Results (JSON)",
-                                json_data,
-                                "search_results.json",
-                                "application/json"
-                            )
-                else:
-                    st.info("No results found.")
-
-            if 'index_stats' in st.session_state:
-                with st.expander("📊 Index Statistics", expanded=False):
-                    st.json(st.session_state['index_stats'])
-
-            if db:
-                file_count = db.get_file_count()
-                st.info(f"Total indexed files: {file_count} — index: `{db_path}`")
-
-            with st.expander("📜 Search History", expanded=False):
-                try:
-                    history = search_engine.get_search_history()
-                    recent = history.get_recent(10)
-                    if recent:
-                        for item in recent:
-                            st.write(f"**{item['query']}** ({item['results_count']} results) - {item['executed_at']}")
-                    else:
-                        st.write("No search history yet.")
-
-                    if st.button("Clear History"):
-                        history.clear()
-                        st.rerun()
-                except Exception as e:
-                    st.error(f"Error accessing search history: {e}")
-
-            with st.expander("⚡ Advanced Search", expanded=False):
-                st.info("Advanced search features:")
-                st.write("- **Boolean search**: AND, OR, NOT operators")
-                st.write("- **Wildcard search**: * and ? wildcards")
-                st.write("- **Phrase search**: \"exact phrase\"")
-                st.write("- **Regex search**: /pattern/")
-
-                advanced_query = st.text_input("Advanced Query", placeholder='"report" AND (pdf OR docx)')
-                if advanced_query:
-                    try:
-                        adv_search = AdvancedSearch(db)
-                        parsed = adv_search.parse_advanced_query(advanced_query)
-                        fts_query = adv_search.build_advanced_fts_query(parsed)
-                        st.json({"Parsed": parsed, "FTS Query": fts_query})
-                    except Exception as e:
-                        st.error(f"Advanced search error: {e}")
-
-            with st.expander("💡 Search Suggestions", expanded=False):
-                try:
-                    if search_query:
-                        suggestions = search_engine.get_search_suggestions_for_prefix(search_query)
-                        if suggestions:
-                            st.write("**Suggestions based on your search:**")
-                            for s in suggestions:
-                                st.write(f"- {s['text']} ({s.get('type', 'suggestion')})")
-                        else:
-                            st.write("No suggestions found.")
-
-                    st.write("**Popular search terms:**")
-                    try:
-                        sugg_mgr = search_engine.get_search_suggestions()
-                        popular = sugg_mgr.get_popular_terms(5)
-                        for item in popular:
-                            st.write(f"- {item['term']} ({item['count']} searches)")
-                    except Exception:
-                        st.write("No popular terms available.")
-                except Exception as e:
-                    st.error(f"Error accessing suggestions: {e}")
-
-            with st.expander("📊 Search Feedback", expanded=False):
-                try:
-                    if 'search_results' in st.session_state and st.session_state['search_results']:
-                        results_data = st.session_state['search_results']
-                        feedback = search_engine.get_search_feedback().format_feedback(
-                            query=results_data['query'],
-                            results_count=results_data['total'],
-                            execution_time=results_data['execution_time'],
-                            parsed_info=parsed_info
-                        )
-
-                        st.write(f"**Query:** {feedback['query']}")
-                        st.write(f"**Results:** {feedback['results_count']}")
-                        st.write(f"**Execution Time:** {feedback['execution_time_ms']}ms ({feedback['time_label']})")
-
-                        if feedback['suggestions']:
-                            st.write("**Suggestions for refining search:**")
-                            for s in feedback['suggestions']:
-                                st.write(f"- {s}")
-                    else:
-                        st.write("Run a search to see feedback.")
-                except Exception as e:
-                    st.error(f"Error accessing feedback: {e}")
-
-            with st.expander("🎨 Visual Enhancements", expanded=False):
-                st.info("File category colors:")
-
-                visual = VisualEnhancements()
-                categories = ['document', 'image', 'video', 'audio', 'archive', 'code', 'data', 'other']
-
-                for cat in categories:
-                    icon = visual.get_category_icon(cat)
-                    color = visual.get_category_color(cat)
-                    st.write(f"{icon} **{cat.capitalize()}**: <span style='color:{color};'>●</span>", unsafe_allow_html=True)
-
-                st.divider()
-                st.info("File type icons:")
-                st.write("📄 Document | 🖼️ Image | 🎥 Video | 🔊 Audio | 📦 Archive | 💻 Code | 📊 Data | 📄 Other")
+    # ==================== INGESTION ====================
+    with main_tab3:
+        st.subheader("📥 Ingestion — indexes, sourcetypes & field extractions")
+        render_ingestion_tab(db, ingest_store)
 
     # ==================== STORAGE DASHBOARD ====================
-    with main_tab3:
+    with main_tab4:
         st.subheader("📊 Storage Dashboard")
 
         storage_df = None
@@ -810,43 +574,52 @@ def main():
             sdf = storage_df.copy()
             total_bytes = int(sdf['size_bytes'].sum())
 
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Files", f"{len(sdf):,}")
-            m2.metric("Total Size", get_human_size(total_bytes))
-            m3.metric("Largest File", get_human_size(int(sdf['size_bytes'].max())))
-            avg_ext = sdf['name'].str.lower().str.rsplit('.', n=1).str[-1]
-            common = avg_ext.value_counts()
-            m4.metric("Most Common Type", f".{common.index[0]}" if len(common) else "—")
+            overview_tab, diskmap_tab = st.tabs(["📈 Overview", "🗺️ Disk Map"])
 
-            st.divider()
-            col1, col2 = st.columns(2)
+            with overview_tab:
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Files", f"{len(sdf):,}")
+                m2.metric("Total Size", get_human_size(total_bytes))
+                m3.metric("Largest File", get_human_size(int(sdf['size_bytes'].max())))
+                avg_ext = sdf['name'].str.lower().str.rsplit('.', n=1).str[-1]
+                common = avg_ext.value_counts()
+                m4.metric("Most Common Type", f".{common.index[0]}" if len(common) else "—")
 
-            with col1:
-                st.write("**Size by extension (top 15)**")
-                ext_sizes = sdf.assign(ext=avg_ext).groupby('ext')['size_bytes'].sum() \
-                    .sort_values(ascending=False).head(15) / (1024 * 1024)
-                st.bar_chart(ext_sizes)
+                st.divider()
+                col1, col2 = st.columns(2)
 
-            with col2:
-                st.write("**File count by extension (top 15)**")
-                ext_counts = avg_ext.value_counts().head(15)
-                st.bar_chart(ext_counts)
+                with col1:
+                    st.write("**Size by extension (top 15)**")
+                    ext_sizes = sdf.assign(ext=avg_ext).groupby('ext')['size_bytes'].sum() \
+                        .sort_values(ascending=False).head(15) / (1024 * 1024)
+                    st.bar_chart(ext_sizes)
 
-            st.divider()
-            col1, col2 = st.columns(2)
-            with col1:
-                st.write("**Top 10 largest files**")
-                top10 = sdf.nlargest(10, 'size_bytes')[['name', 'size_human', 'full_path']]
-                st.dataframe(top10, width='stretch', hide_index=True)
-            with col2:
-                if 'modified_at_epoch' in sdf.columns:
-                    st.write("**Files by month modified (last 24 months)**")
-                    months = pd.to_datetime(sdf['modified_at_epoch'], unit='s').dt.to_period('M').astype(str)
-                    recent = months[months >= (pd.Timestamp.now() - pd.DateOffset(months=23)).strftime('%Y-%m')]
-                    st.bar_chart(recent.value_counts().sort_index())
+                with col2:
+                    st.write("**File count by extension (top 15)**")
+                    ext_counts = avg_ext.value_counts().head(15)
+                    st.bar_chart(ext_counts)
+
+                st.divider()
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write("**Top 10 largest files**")
+                    top10 = sdf.nlargest(10, 'size_bytes')[['name', 'size_human', 'full_path']]
+                    st.dataframe(top10, width='stretch', hide_index=True)
+                with col2:
+                    if 'modified_at_epoch' in sdf.columns:
+                        st.write("**Files by month modified (last 24 months)**")
+                        months = pd.to_datetime(sdf['modified_at_epoch'], unit='s').dt.to_period('M').astype(str)
+                        recent = months[months >= (pd.Timestamp.now() - pd.DateOffset(months=23)).strftime('%Y-%m')]
+                        st.bar_chart(recent.value_counts().sort_index())
+
+            with diskmap_tab:
+                st.subheader("🗺️ Disk Map")
+                st.caption("Sunburst of folder sizes — pick a folder below the chart to "
+                           "redraw it centered on that folder (largest slices first).")
+                render_disk_map(sdf)
 
     # ==================== WATCH DASHBOARD ====================
-    with main_tab4:
+    with main_tab5:
         st.subheader("👀 Folder Change Monitoring")
 
         if 'watch_paths' not in st.session_state:
