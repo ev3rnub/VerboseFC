@@ -35,7 +35,9 @@ A local file discovery, indexing, and search tool with a [Streamlit](https://str
   page (results, timeline, field counts, drill-downs) runs through the VPL engine
 - **Expandable query bar** — the ▾ / ▴ handles grow and shrink the query field
   for long pipelines (it's also drag-resizable from its bottom-right corner,
-  like Splunk's multiline search box)
+  like Splunk's multiline search box); when expanded, a grey **line-number
+  gutter** appears at the left edge of the bar — display-only indicators,
+  never part of the query
 - **Time Range Picker**: Any time / Last hour / 24 hours / 7 days / Today /
   Yesterday / 30 days / 90 days / This year / Custom date range — sits inline
   left of the query bar, Search button on the right, all on one row; applies to
@@ -111,7 +113,7 @@ Then, in the browser UI:
 2. Click **Scan & Index Directory**. The app hashes files in parallel and builds the search index.
 3. Browse the **File Explorer** tab for duplicates and the tree view, or use the **Search** tab to query the index.
 
-> Note: the index database is a temporary SQLite file created in your system temp directory (`verboseFC_<pid>.db`) and is rebuilt on each app session.
+> Note: with **Persistent index** on (the default), the index lives at `~/.verbosefc/verbosefc_index.db` and survives restarts — the File Explorer and Search tab load it automatically on a fresh start. Turn the toggle off to use a temporary database in your system temp directory (`verboseFC_<pid>.db`) that is rebuilt each session.
 
 ## Project structure
 
@@ -137,6 +139,7 @@ src/
 ├── test_vpl.py           # VPL language tests
 ├── test_ingestion.py     # Ingestion (indexes/sourcetypes/extractions) tests
 ├── test_saved.py         # Saved/scheduled search tests
+├── test_gutter.py        # Search query-bar line-number gutter test
 └── requirements.txt
 ```
 
