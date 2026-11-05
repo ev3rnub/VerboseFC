@@ -39,7 +39,9 @@ class FileIndexer:
             'indexed': 0,
             'skipped': 0,
             'errors': 0,
-            'content_extracted': 0
+            'content_extracted': 0,
+            'content_skipped': 0,
+            'error_samples': []
         }
     
     def _get_file_stats(self, file_path: Path) -> Dict:
@@ -99,20 +101,30 @@ class FileIndexer:
                 "sha256": "ERROR" if self.hash_sha256 else ""
             }
     
-    def _should_skip_file(self, file_path: Path) -> bool:
-        """Check if file should be skipped based on various criteria."""
-        # Skip system files
-        if file_path.name.lower() in ["thumbs.db", "$desktop.ini"]:
-            return True
-        
-        # Skip files larger than max content size for content extraction
-        try:
-            if file_path.stat().st_size > self.max_content_size:
-                return False  # Still index metadata but skip content
-        except Exception:
-            return True
-        
-        return False
+    def _is_ignored_name(self, file_path: Path) -> bool:
+        """Files that should not be indexed at all (Windows shell leftovers)."""
+        return file_path.name.lower() in ("thumbs.db", "$desktop.ini")
+
+    def _content_too_large(self, size_bytes: int) -> bool:
+        """True when a file is over the content budget: index metadata, skip reading.
+
+        The old helper returned False ("do not skip") on this branch, so the
+        advertised 10 MB content cap never applied and every readable file was
+        pulled into memory regardless of size.
+        """
+        return self.max_content_size > 0 and size_bytes > self.max_content_size
+
+    def _should_extract_content(self, file_path: Path, size_bytes: int) -> bool:
+        """Metadata-only vs full extraction for one file."""
+        if self._is_ignored_name(file_path):
+            return False
+        return not self._content_too_large(size_bytes)
+
+    def _note_error(self, file_path: Path, exc: Exception) -> None:
+        """Keep a few failure reasons so the UI can explain silent skips."""
+        samples = self._stats.get('error_samples')
+        if samples is not None and len(samples) < 5:
+            samples.append(f"{file_path.name}: {type(exc).__name__}: {exc}")
     
     def _process_single_file(self, file_path: Path) -> Optional[Dict]:
         """
@@ -135,10 +147,14 @@ class FileIndexer:
             content_preview = None
             content_available = 0
             
-            if not self._should_skip_file(file_path):
+            if self._should_extract_content(file_path, stats['size_bytes']):
                 content, content_preview = self.extractor.extract_content(file_path)
                 if content:
                     content_available = 1
+            elif self._content_too_large(stats['size_bytes']):
+                # Counted, not silently dropped: the file is still listed with
+                # its metadata, only the text extraction is skipped.
+                self._stats['content_skipped'] = self._stats.get('content_skipped', 0) + 1
             
             return {
                 'name': file_path.name,
@@ -161,6 +177,7 @@ class FileIndexer:
                 'content_available': content_available
             }
         except Exception as e:
+            self._note_error(file_path, e)
             return None
     
     def index_file(self, file_path: Path, callback: Callable = None) -> Optional[int]:
@@ -218,7 +235,7 @@ class FileIndexer:
                         relative_path = path.relative_to(root)
                         depth = len(relative_path.parts)
                         if depth <= max_depth:
-                            if not self._should_skip_file(path):
+                            if not self._is_ignored_name(path):
                                 files_to_scan.append(path)
                     except ValueError:
                         pass
@@ -256,7 +273,9 @@ class FileIndexer:
             'indexed': 0,
             'skipped': 0,
             'errors': 0,
-            'content_extracted': 0
+            'content_extracted': 0,
+            'content_skipped': 0,
+            'error_samples': []
         }
         
         # Optionally skip files whose stored mtime matches the on-disk mtime

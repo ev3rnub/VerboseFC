@@ -26,6 +26,42 @@ class SearchDatabase:
             self._initialize_schema()
         return self._local.connection
     
+    _fts_migration_lock = threading.Lock()
+
+    def _migrate_fts_file_id(self, conn):
+        """Rebuild the FTS table once if file_id is still an indexed column.
+
+        Indexes written before file_id became UNINDEXED return false positives
+        for numeric terms (the file's own id matched). Rows are copied into a
+        rebuilt table, so an existing index survives the upgrade instead of
+        being thrown away.
+        """
+        with SearchDatabase._fts_migration_lock:
+            try:
+                row = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='content'"
+                ).fetchone()
+                if not row or 'unindexed' in (row[0] or '').lower():
+                    return
+                conn.execute('''
+                    CREATE VIRTUAL TABLE IF NOT EXISTS content_v2 USING fts5(
+                        file_id UNINDEXED,
+                        preview,
+                        full_content,
+                        tokenize='porter unicode61'
+                    )
+                ''')
+                conn.execute('''
+                    INSERT INTO content_v2 (file_id, preview, full_content)
+                    SELECT file_id, preview, full_content FROM content
+                ''')
+                conn.execute('DROP TABLE content')
+                conn.execute('ALTER TABLE content_v2 RENAME TO content')
+                conn.commit()
+            except sqlite3.OperationalError:
+                # Another connection already rebuilt it; this one can carry on.
+                conn.rollback()
+
     def _initialize_schema(self):
         """Create database schema if it doesn't exist."""
         conn = self._get_connection()
@@ -64,12 +100,16 @@ class SearchDatabase:
         # Using 'porter' tokenizer for stemming and 'unicode61' for proper tokenization
         cursor.execute('''
             CREATE VIRTUAL TABLE IF NOT EXISTS content USING fts5(
-                file_id,
+                file_id UNINDEXED,
                 preview,
                 full_content,
                 tokenize='porter unicode61'
             )
         ''')
+        # file_id is UNINDEXED on purpose: while it was an indexed column, a
+        # numeric query matched the internal row id ("1" returned whatever file
+        # happened to have id 1). Older index files are migrated below.
+        self._migrate_fts_file_id(conn)
         
         # Tags table for user-defined or auto-generated tags
         cursor.execute('''
@@ -99,7 +139,9 @@ class SearchDatabase:
             ON search_history(timestamp DESC)
         ''')
         
-        # Index state table for Phase 3 incremental indexing
+        # Reserved (nothing in the shipped UI writes to these three tables;
+        # they stay defined so older index files keep loading and clear_all
+        # has something to empty). See enhanced_features.py.
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS index_state (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,7 +155,7 @@ class SearchDatabase:
             CREATE INDEX IF NOT EXISTS idx_state_hash ON index_state(file_hash)
         ''')
         
-        # Index versions table for Phase 3 rollback support
+
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS index_versions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,7 +165,7 @@ class SearchDatabase:
             )
         ''')
         
-        # Search cache table for Phase 3 performance
+
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS search_cache (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -457,6 +499,25 @@ class SearchDatabase:
         
         return [dict(row) for row in cursor.fetchall()]
     
+    def get_all_files_meta(self) -> List[Dict]:
+        """Every indexed row except content_preview.
+
+        The dashboard dataframes load the whole index; dropping the preview text
+        keeps them from carrying a few hundred characters of text for every file
+        in the index.
+        """
+        self._ensure_connection()
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, name, full_path, size_bytes, size_human, md5, sha256,
+                   extension, file_type, file_category, created_at, modified_at,
+                   accessed_at, content_available, created_at_epoch,
+                   modified_at_epoch, accessed_at_epoch
+            FROM files ORDER BY modified_at_epoch DESC
+        ''')
+        return [dict(row) for row in cursor.fetchall()]
+
     def get_file_count(self) -> int:
         """Get total number of indexed files."""
         self._ensure_connection()

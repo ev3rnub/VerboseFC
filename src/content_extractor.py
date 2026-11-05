@@ -9,6 +9,16 @@ from typing import Optional, Tuple
 from pathlib import Path
 
 
+# Bounded-read budgets. Without these, extraction read whole files (and whole
+# archive members) into memory before truncating, so one huge .log or one
+# multi-gigabyte zip member could stall or OOM a worker process.
+MAX_CONTENT_CHARS = 500_000        # stored text per file
+MAX_READ_BYTES = 2_000_000         # bytes read from a plain text file
+ARCHIVE_MEMBER_READ_BYTES = 4096   # bytes read per archive member (we keep 1000 chars)
+MAX_ARCHIVE_ENTRIES = 50           # members inspected per archive
+ARCHIVE_TEXT_EXTS = ('.txt', '.md', '.csv', '.json', '.xml', '.log', '.yml', '.yaml', '.ini', '.cfg')
+
+
 class ContentExtractor:
     """Extracts text content from files for search indexing."""
     
@@ -33,24 +43,28 @@ class ContentExtractor:
         self._pptx_extractor = None
         self._eml_extractor = None
         
-    def _get_text_from_file(self, file_path: Path) -> Optional[str]:
-        """Try to read file as text with various encodings."""
-        encodings = ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252']
-        
-        for encoding in encodings:
-            try:
-                with open(file_path, 'r', encoding=encoding, errors='replace') as f:
-                    content = f.read()
-                    # Limit content to prevent memory issues
-                    if len(content) > 500000:
-                        return content[:500000] + "\n\n[Content truncated - file too large]"
-                    return content
-            except UnicodeDecodeError:
-                continue
-            except Exception:
-                return None
-        return None
-    
+    def _get_text_from_file(self, file_path: Path,
+                           max_bytes: int = MAX_READ_BYTES) -> Optional[str]:
+        """Read at most `max_bytes` of a file and decode it as text.
+
+        Reads a bounded prefix instead of the whole file: the old version did
+        f.read() on the entire file and only then cut it to 500,000 characters,
+        so a multi-gigabyte .log allocated the whole thing in the worker.
+        UTF-8 with errors='replace' never raises, so the previous four-encoding
+        loop only ever ran its first iteration; BOM handling is preserved.
+        """
+        try:
+            with open(file_path, 'rb') as f:
+                raw = f.read(max_bytes)
+        except Exception:
+            return None
+        if raw.startswith(b"\xef\xbb\xbf"):      # utf-8-sig compatibility
+            raw = raw[3:]
+        content = raw.decode('utf-8', errors='replace')
+        if len(content) > MAX_CONTENT_CHARS:
+            content = content[:MAX_CONTENT_CHARS] + "\n\n[Content truncated - file too large]"
+        return content
+
     def _get_preview(self, content: str, max_length: int = 500) -> str:
         """Generate a preview of content (first N characters)."""
         if not content:
@@ -198,82 +212,104 @@ class ContentExtractor:
         return None, None
     
     def extract_archive_content(self, file_path: Path) -> Tuple[Optional[str], Optional[str]]:
-        """
-        Extract text content from archive files (.zip, .tar, .gz, .rar, .7z).
-        Returns (full_content, preview) or (None, None) if extraction fails.
+        """Extract text from .zip / .tar / .tar.gz / .7z members.
+
+        Member reads are capped (ARCHIVE_MEMBER_READ_BYTES) and the number of
+        members inspected is capped (MAX_ARCHIVE_ENTRIES), so one big archive
+        can no longer dominate a scan. .rar is deliberately not handled: this
+        app uses no RAR library, so those archives are indexed by metadata only.
         """
         import zipfile
         import tarfile
-        
+
+        def member_text(name: str, read) -> Optional[str]:
+            """Keep only the first characters of a text member, labelled by name."""
+            if not name.endswith(ARCHIVE_TEXT_EXTS):
+                return None
+            try:
+                raw = read(ARCHIVE_MEMBER_READ_BYTES)
+            except Exception:
+                return None
+            if not raw:
+                return None
+            return f"{name}:\n{raw.decode('utf-8', errors='replace')[:1000]}"
+
         ext = file_path.suffix.lower()
-        
+
         try:
             if ext == '.zip':
+                files = []
                 with zipfile.ZipFile(file_path, 'r') as zf:
-                    files = []
                     for info in zf.infolist():
-                        if not info.is_dir() and info.filename.endswith(('.txt', '.md', '.csv', '.json', '.xml', '.log')):
-                            try:
-                                content = zf.read(info).decode('utf-8', errors='replace')
-                                files.append(f"{info.filename}:\n{content[:1000]}")
-                            except Exception:
-                                continue
-                    full_content = '\n\n'.join(files)
-                    return full_content, self._get_preview(full_content)
-            
-            elif ext == '.tar':
-                with tarfile.open(file_path, 'r') as tf:
-                    files = []
-                    for member in tf.getmembers():
-                        if member.isfile() and member.name.endswith(('.txt', '.md', '.csv', '.json', '.xml', '.log')):
-                            try:
-                                f = tf.extractfile(member)
-                                if f:
-                                    content = f.read().decode('utf-8', errors='replace')
-                                    files.append(f"{member.name}:\n{content[:1000]}")
-                            except Exception:
-                                continue
-                    full_content = '\n\n'.join(files)
-                    return full_content, self._get_preview(full_content)
-            
-            elif ext == '.gz' and str(file_path).endswith('.tar.gz'):
-                with tarfile.open(file_path, 'r:gz') as tf:
-                    files = []
-                    for member in tf.getmembers():
-                        if member.isfile() and member.name.endswith(('.txt', '.md', '.csv', '.json', '.xml', '.log')):
-                            try:
-                                f = tf.extractfile(member)
-                                if f:
-                                    content = f.read().decode('utf-8', errors='replace')
-                                    files.append(f"{member.name}:\n{content[:1000]}")
-                            except Exception:
-                                continue
-                    full_content = '\n\n'.join(files)
-                    return full_content, self._get_preview(full_content)
-            
-            elif ext == '.7z':
+                        if len(files) >= MAX_ARCHIVE_ENTRIES:
+                            break
+                        if info.is_dir():
+                            continue
+                        try:
+                            with zf.open(info) as fh:
+                                entry = member_text(info.filename, fh.read)
+                        except Exception:
+                            continue
+                        if entry:
+                            files.append(entry)
+                full_content = '\n\n'.join(files)
+                return full_content, self._get_preview(full_content)
+
+            if ext == '.tar' or str(file_path).endswith('.tar.gz'):
+                mode = 'r:gz' if str(file_path).endswith('.tar.gz') else 'r'
+                files = []
+                with tarfile.open(file_path, mode) as tf:
+                    for member in tf:
+                        if len(files) >= MAX_ARCHIVE_ENTRIES:
+                            break
+                        if not member.isfile():
+                            continue
+                        try:
+                            fh = tf.extractfile(member)
+                        except Exception:
+                            continue
+                        if fh is None:
+                            continue
+                        try:
+                            entry = member_text(member.name, fh.read)
+                        finally:
+                            fh.close()
+                        if entry:
+                            files.append(entry)
+                full_content = '\n\n'.join(files)
+                return full_content, self._get_preview(full_content)
+
+            if ext == '.7z':
                 try:
                     import py7zr
-                    with py7zr.SevenZipFile(file_path, mode='r') as z:
-                        files = []
-                        for name, file in z.readall().items():
-                            if name.endswith(('.txt', '.md', '.csv', '.json', '.xml', '.log')):
-                                try:
-                                    content = file.read().decode('utf-8', errors='replace')
-                                    files.append(f"{name}:\n{content[:1000]}")
-                                except Exception:
-                                    continue
-                        full_content = '\n\n'.join(files)
-                        return full_content, self._get_preview(full_content)
                 except ImportError:
-                    # py7zr not installed, skip 7z files
+                    return None, None
+                files = []
+                try:
+                    with py7zr.SevenZipFile(file_path, mode='r') as z:
+                        # read() only decompresses the listed members; readall()
+                        # would decompress the entire archive into memory.
+                        names = [en.filename for en in z.list()
+                                 if not en.filename.endswith('/')][:MAX_ARCHIVE_ENTRIES]
+                        if not names:
+                            return None, None
+                        for name, fh in z.read(names).items():
+                            try:
+                                entry = member_text(name, fh.read)
+                            finally:
+                                fh.close()
+                            if entry:
+                                files.append(entry)
+                except Exception:
                     pass
-        
+                full_content = '\n\n'.join(files)
+                return full_content, self._get_preview(full_content)
+
         except Exception:
             pass
-        
+
         return None, None
-    
+
     def categorize_file(self, file_path: Path) -> str:
         """Categorize a file based on its extension."""
         ext = file_path.suffix.lower()

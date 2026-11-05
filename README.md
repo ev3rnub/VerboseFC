@@ -93,24 +93,36 @@ A local file discovery, indexing, and search tool with a [Streamlit](https://str
 **Indexing pipeline**
 - Content extraction from text/code files plus PDF, DOCX, XLSX, PPTX, HTML, and more
 - Files auto-categorized: document, image, video, audio, archive, code, data
-- Incremental indexing and search caching support
+- Archives are indexed through the text of their members: `.zip`, `.tar*` and
+  `.7z` contribute up to 50 text-like members, 4 KB each. `.rar` files are
+  indexed by metadata only (no reader is bundled)
+- Re-scans skip files whose size/mtime are unchanged when **Persistent index**
+  is on; files over the content-size cap are indexed as metadata and counted in
+  the "content skipped" line rather than dropped silently
 
 ## Getting started
 
-Requires Python 3.10+.
+Requires Python 3.10+. Verified on Python 3.12 with Streamlit 1.66, pandas 3.1
+and watchdog 7 (`src/requirements.txt` lists the floors; the UI calls need
+Streamlit 1.50 or newer).
 
 ```bash
 # Install dependencies
 pip install -r src/requirements.txt
 
-# Run the app
+# Run the app (from this folder, so .streamlit/config.toml is picked up)
 streamlit run src/verboseFC.py
 ```
+
+> The bundled `.streamlit/config.toml` binds the server to `127.0.0.1`. The app
+> has no login and can open/move your files, so do not expose it on the network
+> unless you mean to: `streamlit run src/verboseFC.py --server.address 0.0.0.0`.
 
 Then, in the browser UI:
 
 1. Set a **Base Path** in the sidebar (e.g. `~/Documents`) and a max recursion depth.
-2. Click **Scan & Index Directory**. The app hashes files in parallel and builds the search index.
+   It starts empty on purpose — nothing is scanned until you point it somewhere.
+2. Click **Scan & Index Directory** (greyed out while a scan is already running). The app hashes files in parallel and builds the search index.
 3. Browse the **File Explorer** tab for duplicates and the tree view, or use the **Search** tab to query the index.
 
 > Note: with **Persistent index** on (the default), the index lives at `~/.verbosefc/verbosefc_index.db` and survives restarts — the File Explorer and Search tab load it automatically on a fresh start. Turn the toggle off to use a temporary database in your system temp directory (`verboseFC_<pid>.db`) that is rebuilt each session.
@@ -131,8 +143,8 @@ src/
 ├── indexer.py            # FileIndexer — indexing pipeline (hash options, skip-unchanged, pause/cancel)
 ├── content_extractor.py  # ContentExtractor — text extraction & file categorization
 ├── search_engine.py      # SearchEngine — query parsing + full-text search
-├── enhanced_features.py  # AdvancedSearch, SearchCache, IncrementalIndexer, SearchHistory
-├── ux_enhancements.py    # SearchSuggestions, SearchFeedback, VisualEnhancements
+├── enhanced_features.py  # SearchHistory — persisted search history
+├── ux_enhancements.py    # SearchSuggestions, SearchFeedback
 ├── file_actions.py       # Open/Reveal (Finder/Explorer), move-to-trash, backup-move
 ├── watcher.py            # FolderWatcher — watchdog multi-folder monitoring
 ├── test_integration.py   # Smoke/integration tests (run: python test_integration.py)
@@ -148,8 +160,7 @@ src/
 - **streamlit** — web UI
 - **pandas** — tabular scan results and CSV export
 - **PyPDF2, python-docx, openpyxl, python-pptx, beautifulsoup4** — content extraction
-- **python-magic** — file type detection (needs libmagic; usually present on macOS)
-- **py7zr, rarfile** — archive handling
+- **py7zr** — 7z archive content (`.rar` is metadata-only)
 - **watchdog** — real-time folder monitoring (Watch dashboard)
 - **send2trash** — move duplicates to the OS Trash / Recycle Bin
 
@@ -162,4 +173,26 @@ src/
 - The persistent index lives at `~/.verbosefc/verbosefc_index.db` (delete it to start clean). Watch alerts are stored in the same database and survive restarts.
 - Fast hashing compares the first 1 MB + file size — very rare false positives for files identical in their first megabyte.
 - PDF previews are embedded inline up to 20 MB.
+- Content extraction is capped per file (10 MB) and per extracted document
+  (500,000 characters), so a huge log file cannot balloon the index.
+- Opening an index built before 11/05 migrates the full-text table in place
+  (`file_id` becomes UNINDEXED, which stops numeric queries such as `12`
+  matching byte sizes). Rows are preserved; the migration is a no-op afterwards.
+- The app binds `127.0.0.1` by default (`.streamlit/config.toml`) and has no
+  authentication of any kind — treat any override as "anyone on this network
+  can browse, open and trash the files this process can reach".
+
+## Running the tests
+
+The suites are plain scripts (no pytest needed). From `src/`:
+
+```bash
+python test_walk.py           # directory walk, depth limits, pruning
+python test_vpl.py            # VPL parser + SQL translation
+python test_ingestion.py      # indexes, sourcetypes, field extractions
+python test_saved.py          # saved & scheduled searches
+python test_gutter.py         # search query-bar line gutter
+python test_integration.py    # end-to-end: index → search → duplicates
+python test_regressions.py    # size caps, FTS migration, duplicate keeper guard
+```
 - Open/Reveal launch native apps on the machine running the Streamlit server (fine for local use; not over a remote browser).

@@ -1,5 +1,6 @@
 import os
 import time
+import hashlib
 import json
 import base64
 import tempfile
@@ -18,7 +19,8 @@ from db import SearchDatabase
 from indexer import FileIndexer
 from search_engine import SearchEngine, create_search_engine
 from scan_runner import ScanController, get_human_size
-from file_actions import open_path, reveal_path, move_to_trash, backup_move
+from file_actions import (open_path, reveal_path, move_to_trash, backup_move,
+                        duplicate_mover_targets)
 from watcher import FolderWatcher
 from saved_searches import SavedSearchStore
 from search_page import render_search_tab
@@ -30,7 +32,36 @@ from ingestion_page import render_ingestion_tab
 PERSISTENT_DB_PATH = Path.home() / ".verbosefc" / "verbosefc_index.db"
 FAST_HASH_LIMIT = 1024 * 1024  # first 1 MB when fast hashing is enabled
 MAX_PDF_PREVIEW_BYTES = 20 * 1024 * 1024
+# How many duplicate groups the Duplicates tab renders and acts on in one pass.
+DUP_GROUPS_SHOWN = 100
+
+
 DISKMAP_MAX_ROWS = 2000
+
+
+def _dup_group_key(group) -> str:
+    """Stable id for a duplicate group, independent of its position in the list.
+
+    Group widgets used to be keyed by their index in dup_groups, so when a group
+    disappeared (after an apply, or after the hash/dedup setting changed) the
+    stored 'kept copy' belonged to a different group and a group could end up
+    with no valid keeper selected — moving every copy in it.
+    """
+    paths = '|'.join(sorted(group['full_path'].tolist()))
+    return hashlib.sha1(paths.encode('utf-8', 'replace')).hexdigest()[:12]
+
+
+def _clear_duplicate_keepers() -> None:
+    """Drop keeper/act selections that refer to a previous result frame."""
+    for key in [k for k in list(st.session_state.keys())
+                if k.startswith('dupkeep_') or k.startswith('dupgrp_')]:
+        del st.session_state[key]
+
+
+def _scan_is_running() -> bool:
+    """True while a ScanController thread is still walking/hashing/indexing."""
+    controller = st.session_state.get('scan_controller')
+    return controller is not None and controller.is_active()
 
 
 # --- Disk Map (sunburst) ---
@@ -228,7 +259,10 @@ def main():
 
     with st.sidebar:
         st.header("Settings")
-        base_path = st.text_input("Base Path", value="~", help="Root directory to scan and index")
+        # No default on purpose: prefilling "~" made the primary button start a
+        # scan (and full-content index) of the user's entire home directory.
+        base_path = st.text_input("Base Path", value="", placeholder="~/Documents",
+                                  help="Root directory to scan and index")
         max_depth = st.slider("Max Recursion Depth", 1, 10, 2)
         workers = st.slider("Parallel Workers", 1, 16, 4)
 
@@ -250,7 +284,14 @@ def main():
             if not hash_md5 and not hash_sha256:
                 st.caption("No hashing selected — duplicate detection will be unavailable for this scan.")
 
-        run_scan = st.button("Scan & Index Directory", type="primary")
+        # A second scan would replace session_state['scan_controller'] and leave
+        # the first thread running with no reference to pause or cancel it.
+        scan_running = _scan_is_running()
+        run_scan = st.button("Scan & Index Directory", type="primary",
+                             disabled=scan_running)
+        if scan_running:
+            st.caption("A scan is already running — use Pause / Cancel. Starting "
+                       "another would orphan the first one.")
 
     # --- Database / services ---
     if persistent_index:
@@ -259,27 +300,43 @@ def main():
     else:
         db_path = os.path.join(tempfile.gettempdir(), f"verboseFC_{os.getpid()}.db")
 
-    db = SearchDatabase(db_path)
+    # Services are rebuilt only when their configuration changes. The scan
+    # progress loop reruns this script about every second, and a brand-new
+    # SearchDatabase means a fresh SQLite connection plus the whole schema
+    # script re-executed on every one of those reruns.
+    # The previous db object is left to reference counting: a scan already
+    # started holds its own reference, and closing the connection out from
+    # under that thread would abort it mid-write.
+    db_holder = st.session_state.setdefault('db_holder', {})
+    if st.session_state.get('db_path') != db_path:
+        db_holder['db'] = SearchDatabase(db_path)
+        st.session_state['db_path'] = db_path
+        st.session_state.pop('indexer_key', None)   # rebuild against the new db
+    db = db_holder['db']
     st.session_state['db'] = db
-    st.session_state['db_path'] = db_path
 
+    indexer_key = (db_path, hash_md5, hash_sha256, fast_hash)
+    if st.session_state.get('indexer_key') != indexer_key:
+        st.session_state.pop('indexer', None)
+        st.session_state.pop('search_engine', None)
     indexer = None
     search_engine = None
     if enable_indexing:
-        extractor = ContentExtractor()
-        indexer = FileIndexer(
-            db, extractor,
-            hash_md5=hash_md5, hash_sha256=hash_sha256,
-            fast_hash_mb=(FAST_HASH_LIMIT / (1024 * 1024)) if fast_hash else 0.0
-        )
-        st.session_state['indexer'] = indexer
-        search_engine = create_search_engine(db)
-        st.session_state['search_engine'] = search_engine
+        if 'indexer' not in st.session_state:
+            st.session_state['indexer'] = FileIndexer(
+                db, ContentExtractor(),
+                hash_md5=hash_md5, hash_sha256=hash_sha256,
+                fast_hash_mb=(FAST_HASH_LIMIT / (1024 * 1024)) if fast_hash else 0.0
+            )
+            st.session_state['search_engine'] = create_search_engine(db)
+        st.session_state['indexer_key'] = indexer_key
+        indexer = st.session_state['indexer']
+        search_engine = st.session_state['search_engine']
 
     # --- Scan control (pause / resume / cancel) ---
     controller: Optional[ScanController] = st.session_state.get('scan_controller')
 
-    if run_scan:
+    if run_scan and not scan_running:
         root = get_resolved_path(base_path)
         if not root.exists():
             st.error(f"Path '{base_path}' does not exist!")
@@ -345,26 +402,45 @@ def main():
                 df = pd.DataFrame(controller.results)
                 st.session_state['scan_results'] = df
                 st.session_state['scan_root'] = get_resolved_path(base_path)
+                _clear_duplicate_keepers()   # row labels are meaningless for the new frame
             if controller.index_stats is not None:
                 st.session_state['index_stats'] = controller.index_stats
-                st.session_state['indexed_files'] = db.get_all_files()
+            stats = controller.index_stats
             if controller.status == 'done':
                 st.success(f"Scan complete: {len(controller.results)} files."
-                           + (f" Index stats: {controller.index_stats}" if controller.index_stats else ""))
+                           + (f" Indexed {stats['indexed']} (text extracted from {stats['content_extracted']}, "
+                              f"{stats.get('skipped', 0)} unchanged files skipped)." if stats else ""))
+            if stats:
+                if stats.get('content_skipped'):
+                    limit_mb = int((indexer.max_content_size if indexer else 10 * 1024 * 1024)
+                                   / (1024 * 1024))
+                    st.info(f"{stats['content_skipped']} file(s) over {limit_mb} MB are listed with "
+                            "metadata only — their text was not read, so a scan can never block on a "
+                            "huge file.")
+                if stats.get('errors'):
+                    samples = stats.get('error_samples') or []
+                    st.warning(f"{stats['errors']} file(s) could not be indexed."
+                               + (f" Examples: {'; '.join(samples)}" if samples else ""))
             elif controller.status == 'cancelled':
                 st.warning("Scan cancelled. Partial results kept.")
             time.sleep(0.5)
             st.rerun()
 
     # --- Main UI Tabs ---
+    # --- Main UI Tabs ---
     pending_alerts = db.get_unacknowledged_alert_count()
     alert_label = f"👀 Watch ({pending_alerts})" if pending_alerts else "👀 Watch"
-    saved_store = SavedSearchStore(db)
-    st.session_state['saved_store'] = saved_store
+    # Stores run schema/derived-column checks on construction, so they are kept
+    # across reruns and only replaced when the index path changes.
+    if not isinstance(st.session_state.get('saved_store'), SavedSearchStore) or \
+            st.session_state.get('store_db_path') != db_path:
+        st.session_state['saved_store'] = SavedSearchStore(db)
+        st.session_state['ingest_store'] = IngestionStore(db)
+        st.session_state['store_db_path'] = db_path
+    saved_store = st.session_state['saved_store']
     new_runs = saved_store.unseen_runs(st.session_state.get('sched_seen_id', 0))
     search_label = f"🔍 Search ({new_runs})" if new_runs else "🔍 Search"
-    ingest_store = IngestionStore(db)
-    st.session_state['ingest_store'] = ingest_store
+    ingest_store = st.session_state['ingest_store']
     main_tab1, main_tab2, main_tab3, main_tab4, main_tab5 = st.tabs(
         ["📁 File Explorer", search_label, "📥 Ingestion", "📊 Storage", alert_label]
     )
@@ -374,7 +450,7 @@ def main():
         if 'scan_results' not in st.session_state and db.get_file_count():
             # Fresh launch with a populated index: show the saved index
             # instead of an empty screen (the Storage tab already reads it).
-            rows = db.get_all_files()
+            rows = db.get_all_files_meta()
             st.session_state['scan_results'] = pd.DataFrame(rows)
             try:
                 st.session_state['scan_root'] = Path(os.path.commonpath(
@@ -452,12 +528,17 @@ def main():
                                 "Backup folder", value="~/verbosefc_backups",
                                 help="Duplicates are copied here (relative paths preserved), then the originals are removed."
                             )
+                        if len(dup_groups) > DUP_GROUPS_SHOWN:
+                            st.warning(
+                                f"Only the first {DUP_GROUPS_SHOWN} of {len(dup_groups)} groups are "
+                                "listed and actionable in this pass — the others are left alone.")
                         confirm = st.checkbox("✅ I confirm: move the selected duplicate copies",
                                               key="dup_confirm")
 
                         total_selected = 0
-                        for i, group in enumerate(dup_groups[:100]):
+                        for i, group in enumerate(dup_groups[:DUP_GROUPS_SHOWN]):
                             first = group.iloc[0]
+                            gkey = _dup_group_key(group)
                             n = len(group)
                             with st.expander(f"🔁 {n} copies — {first['size_human']} — {first['name']}"):
                                 st.caption(first['full_path'])
@@ -468,9 +549,9 @@ def main():
                                     group.index.tolist(),
                                     index=group.index.tolist().index(keeper_default),
                                     format_func=lambda idx, g=group: f"{g.loc[idx, 'full_path']}  (modified {time.ctime(g.loc[idx, 'modified_at_epoch'])})",
-                                    key=f"dupkeep_{i}"
+                                    key=f"dupkeep_{gkey}"
                                 )
-                                act = st.checkbox("Act on this group (move the other copies)", key=f"dupgrp_{i}")
+                                act = st.checkbox("Act on this group (move the other copies)", key=f"dupgrp_{gkey}")
                                 if act:
                                     total_selected += n - 1
 
@@ -481,14 +562,27 @@ def main():
                             if st.button("🚚 Apply to selected groups", disabled=not confirm, type="primary"):
                                 moved, failed = 0, 0
                                 messages = []
-                                for i, group in enumerate(dup_groups[:100]):
-                                    if not st.session_state.get(f'dupgrp_{i}', False):
+                                for i, group in enumerate(dup_groups[:DUP_GROUPS_SHOWN]):
+                                    gkey = _dup_group_key(group)
+                                    if not st.session_state.get(f'dupgrp_{gkey}', False):
                                         continue
-                                    keeper_idx = st.session_state.get(f'dupkeep_{i}')
-                                    for idx in group.index:
-                                        if idx == keeper_idx:
-                                            continue
-                                        path = df.loc[idx, 'full_path']
+                                    keeper_idx = st.session_state.get(f'dupkeep_{gkey}')
+                                    labels = [int(x) for x in group.index.tolist()]
+                                    # Resolve the radio value to a path. A label that
+                                    # is stale (the frame changed since the radio was
+                                    # drawn) resolves to no keeper at all.
+                                    keeper_path = None
+                                    if (keeper_idx is not None and int(keeper_idx) in labels
+                                            and int(keeper_idx) in df.index):
+                                        keeper_path = df.loc[int(keeper_idx), 'full_path']
+                                    paths = [df.loc[idx, 'full_path'] for idx in group.index
+                                             if idx in df.index]
+                                    targets, skip = duplicate_mover_targets(paths, keeper_path)
+                                    if skip:
+                                        failed += 1
+                                        messages.append(f"SKIPPED ({skip}): {group['name'].iloc[0]}")
+                                        continue
+                                    for path in targets:
                                         try:
                                             if action == "Move to Trash":
                                                 msg = move_to_trash(path)
@@ -496,7 +590,9 @@ def main():
                                                 msg = backup_move(path, backup_path, str(root))
                                             messages.append(msg)
                                             moved += 1
-                                            df = df.drop(index=idx)
+                                            # Filter, not drop(index=...): the row labels of
+                                            # the other groups stay valid for this pass.
+                                            df = df[df['full_path'] != path]
                                         except Exception as e:
                                             failed += 1
                                             messages.append(f"FAILED: {path} — {e}")
@@ -563,7 +659,7 @@ def main():
             storage_df = st.session_state['scan_results']
             source_note = "from the latest scan"
         elif enable_indexing:
-            all_files = db.get_all_files()
+            all_files = db.get_all_files_meta()
             if all_files:
                 storage_df = pd.DataFrame(all_files)
                 source_note = "from the persistent index"
@@ -655,10 +751,17 @@ def main():
         if watcher is None:
             if st.button("🟢 Start monitoring", type="primary", disabled=not st.session_state['watch_paths']):
                 def on_event(event_type, path, name, watch_path):
+                    # Resolved at event time: this callback outlives the render
+                    # that created it, and the index object can be swapped when
+                    # the Persistent Index setting changes.
+                    # Failures are kept instead of swallowed, so a Watch tab
+                    # badge that never moves can actually be diagnosed.
                     try:
-                        db.add_alert(event_type, path, name, watch_path)
-                    except Exception:
-                        pass
+                        db_holder['db'].add_alert(event_type, path, name, watch_path)
+                    except Exception as e:
+                        errors = db_holder.setdefault('watch_errors', [])
+                        if len(errors) < 20:
+                            errors.append(f"{event_type} {path}: {type(e).__name__}: {e}")
                 watcher = FolderWatcher(on_event)
                 st.session_state['watcher'] = watcher
                 for wp in st.session_state['watch_paths']:
@@ -670,6 +773,10 @@ def main():
             st.info("Monitoring is stopped. Add folders above, then start monitoring.")
         else:
             st.success(f"🟢 Monitoring {len(watcher.watched_paths())} folder(s) in real time.")
+            watch_errors = db_holder.get('watch_errors') or []
+            if watch_errors:
+                st.warning(f"{len(watch_errors)} change event(s) could not be recorded "
+                           "(last 20 kept). Latest: " + " | ".join(watch_errors[-3:]))
             if st.button("🔴 Stop monitoring"):
                 watcher.stop()
                 st.session_state['watcher'] = None

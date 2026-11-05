@@ -23,7 +23,19 @@ from ingestion import DEFAULT_INDEX, IngestionError, IngestionStore
 
 
 def _apply(store: IngestionStore):
-    stats = store.reindex_all()
+    # A rule change rewrites the derived columns of every indexed row. On a big
+    # index that is a visible pause, so it reports progress instead of looking
+    # frozen.
+    bar = st.progress(0.0, text="Reindexing…")
+
+    def _progress(done: int, total: int):
+        bar.progress(min(1.0, done / max(1, total)),
+                     text=f"Reindexing… {done}/{total} files")
+
+    try:
+        stats = store.reindex_all(progress=_progress)
+    finally:
+        bar.empty()
     st.session_state['ingest_msg'] = (
         f"✅ Reindexed {stats['updated']} file(s) — {stats['indexes']} index rule(s), "
         f"{stats['sourcetypes']} sourcetype rule(s), {stats['fields']} field rule(s).")

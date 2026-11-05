@@ -107,11 +107,12 @@ class IngestionStore:
 
     def _ensure_derived(self):
         """Backfill derived columns for rows written before ingestion existed
-        (or by an indexer that doesn't set them). One-time, cheap."""
+        (or by an indexer that doesn't set them). Only the rows that are missing
+        them are touched, and only once per index."""
         cur = self._conn().cursor()
         cur.execute('SELECT COUNT(*) AS n FROM files WHERE index_name IS NULL')
         if cur.fetchone()['n']:
-            self.reindex_all()
+            self.reindex_all(only_missing=True)
 
     # --- validation helpers --------------------------------------------------
 
@@ -245,11 +246,16 @@ class IngestionStore:
 
     # --- apply / reindex -----------------------------------------------------
 
-    def reindex_all(self) -> Dict:
-        """Recompute index_name, sourcetype and extracted_json for every file.
+    def reindex_all(self, progress=None, only_missing: bool = False) -> Dict:
+        """Recompute index_name, sourcetype and extracted_json for indexed files.
 
-        Cheap: reads the already-indexed rows (no filesystem walk, no content
-        re-extraction). Returns a stats dict.
+        No filesystem walk and no content re-extraction, but on a large index it
+        is still a full-table UPDATE, so it reports progress and commits in
+        chunks instead of holding the write lock for the whole pass.
+
+        progress: optional callback(done, total) — a Streamlit progress bar can
+        stream from it while the loop runs.
+        only_missing: touch only rows whose derived columns were never set.
         """
         conn = self._conn()
         cur = conn.cursor()
@@ -261,9 +267,14 @@ class IngestionStore:
                       for r in styp_rules]
         field_rules = [dict(r, _re=re.compile(r['regex'])) for r in field_rules]
 
-        cur.execute('SELECT id, full_path, extension, file_category, file_type FROM files')
+        query = ('SELECT id, full_path, extension, file_category, file_type '
+                 'FROM files WHERE index_name IS NULL'
+                 if only_missing else
+                 'SELECT id, full_path, extension, file_category, file_type FROM files')
+        cur.execute(query)
         files = [dict(r) for r in cur.fetchall()]
 
+        total = len(files)
         updated = 0
         for f in files:
             index_name = self._assign_index(f['full_path'], f['extension'], idx_rules)
@@ -275,6 +286,10 @@ class IngestionStore:
                 (index_name, sourcetype,
                  json.dumps(extracted) if extracted else None, f['id']))
             updated += 1
+            if updated % 500 == 0:
+                conn.commit()          # let the watcher/scan threads write too
+            if progress and (updated % 50 == 0 or updated == total):
+                progress(updated, total)
         conn.commit()
         return {'updated': updated, 'indexes': len(idx_rules),
                 'sourcetypes': len(styp_rules), 'fields': len(field_rules)}

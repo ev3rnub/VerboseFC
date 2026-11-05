@@ -1,13 +1,26 @@
+# Runtime dependencies. Verified on Python 3.12 with the versions listed at the
+# bottom of this file; the floors are the oldest releases the app's API usage
+# allows (the UI calls pass width='stretch' to st.button / st.dataframe, which
+# needs Streamlit 1.50+).
 pandas>=2.0.0
-streamlit>=1.33.0
+streamlit>=1.50,<2
 plotly>=5.18.0
 PyPDF2>=3.0.0
 python-docx>=1.1.0
 openpyxl>=3.1.0
 beautifulsoup4>=4.12.0
-python-magic>=0.4.27
 python-pptx>=0.6.23
 py7zr>=0.20.0
-rarfile>=4.0
 watchdog>=3.0.0
 send2trash>=1.8.0
+
+# Removed from this file on 11/05:
+#   python-magic - imported nowhere in src/, and it fails at import time on a
+#     machine without the system libmagic (the default on macOS), which made a
+#     clean install look broken.
+#   rarfile - imported nowhere; .rar archives are indexed by metadata only.
+#
+# Direct dependency versions used for the 11/05 verification run:
+#   beautifulsoup4 4.15.0, openpyxl 3.1.5, pandas 3.1.0, plotly 7.1.0,
+#   py7zr 1.1.4, PyPDF2 3.0.1, python-docx 1.2.0, python-pptx 1.0.2,
+#   Send2Trash 2.1.0, streamlit 1.66.1, watchdog 7.0.0

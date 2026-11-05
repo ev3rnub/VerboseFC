@@ -184,13 +184,18 @@ class SchedulerThread(threading.Thread):
         self.store = store
         self.interval = interval
         self._stop = threading.Event()
+        self.last_error = None   # last scheduler failure, shown in the Search tab
 
     def run(self):
         while not self._stop.is_set():
             try:
                 self.store.run_due()
-            except Exception:
-                pass  # transient DB locks; retry next tick
+                self.last_error = None
+            except Exception as e:
+                # Transient DB locks are expected and retried, but the failure
+                # is kept so the Search tab can say why nothing showed up.
+                self.last_error = f"{type(e).__name__}: {e}"
+            self._stop.wait(self.interval)
             self._stop.wait(self.interval)
 
     def stop(self):

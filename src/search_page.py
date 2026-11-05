@@ -74,6 +74,9 @@ def _ensure_scheduler(store: SavedSearchStore):
         th = SchedulerThread(store)
         th.start()
         st.session_state['sched_thread'] = th
+    if getattr(th, 'last_error', None):
+        st.warning("The background scheduler hit an error (it retries on the next tick): "
+                   f"{th.last_error}")
 
 
 def _time_picker():

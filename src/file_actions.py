@@ -17,6 +17,24 @@ def _system() -> str:
     return platform.system()  # Windows | Darwin | Linux
 
 
+def duplicate_mover_targets(group_paths, keeper_path):
+    """Decide which copies of a duplicate group get moved.
+
+    Returns (targets, skip_reason). A group whose kept copy cannot be resolved is
+    skipped instead of having every copy moved: with a stale UI selection the
+    "keep one" default becomes "keep none", and files that reach the Trash are
+    not recoverable from inside the app.
+
+    group_paths: the paths of this group that are still present in the results
+    keeper_path: the path the user chose to keep, or None when unknown/stale
+    """
+    if not keeper_path:
+        return [], "no valid kept copy selected - reopen the group and choose one"
+    if keeper_path not in group_paths:
+        return [], "kept copy is no longer listed"
+    return [p for p in group_paths if p != keeper_path], None
+
+
 def open_path(file_path: str) -> None:
     """Open a file or folder with its default application."""
     p = str(Path(file_path))
