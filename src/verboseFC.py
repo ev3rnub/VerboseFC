@@ -1178,8 +1178,20 @@ def main():
                     st.write("**Most frequent queries**")
                     tq = pd.DataFrame(dbstats['top_queries'],
                                       columns=['query', 'runs', 'avg_results'])
-                    st.plotly_chart(px.bar(tq, x='query', y='runs', orientation='h'),
-                                    width='stretch')
+                    # orientation='h' was silently ignored by this Plotly
+                    # (renamed in v6), so the long query strings ended up as
+                    # cramped category labels on the x axis with all bars
+                    # pinned at 1 — it read like a single merged bar. Use an
+                    # explicit vertical bar chart: one bar per query, query
+                    # text in hover, and truncated tick labels for legibility.
+                    tq['label'] = tq['query'].str.slice(0, 28).where(
+                        tq['query'].str.len() <= 28,
+                        tq['query'].str.slice(0, 28) + '…')
+                    tqfig = px.bar(tq, x='label', y='runs',
+                                   labels={'label': 'query', 'runs': 'runs'},
+                                   hover_data={'query': True, 'label': False})
+                    tqfig.update_layout(xaxis_title=None)
+                    st.plotly_chart(tqfig, width='stretch')
 
                 if dbstats['file_activity_by_day']:
                     st.write("**Indexed files modified in the last 90 days**")
