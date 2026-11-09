@@ -12,7 +12,7 @@ A local file discovery, indexing, and search tool with a [Streamlit](https://str
 
 **File Explorer tab**
 - Recursive directory scan with configurable max depth and parallel workers
-- **Duplicates view** — files with identical content, grouped; pick which copy to keep and **move the rest to the OS Trash** (Recycle Bin on Windows) or **move them to a backup folder** (relative paths preserved), with a confirmation step
+- **Duplicates view** — files with identical content, grouped; each group expands to a per-copy table (path, size, hash, modified time) so you can verify the match — including fast-mode candidates and `ERROR` hashes from unreadable files — before acting. Pick which copy to keep and **move the rest to the OS Trash** (Recycle Bin on Windows) or **move them to a backup folder** (relative paths preserved), with a confirmation step
 - **Filename collisions view** — same name, different content
 - Directory tree view, CSV report download
 - **Open** / **Reveal in Finder / Explorer** for any file (cross-platform)

@@ -535,13 +535,37 @@ def main():
                         confirm = st.checkbox("✅ I confirm: move the selected duplicate copies",
                                               key="dup_confirm")
 
+                        # Shorten long digests so the per-copy table stays readable.
+                        def _short_hash(h: str) -> str:
+                            return h[:12] + '…' if len(h) > 16 else h
+
                         total_selected = 0
                         for i, group in enumerate(dup_groups[:DUP_GROUPS_SHOWN]):
                             first = group.iloc[0]
                             gkey = _dup_group_key(group)
                             n = len(group)
                             with st.expander(f"🔁 {n} copies — {first['size_human']} — {first['name']}"):
-                                st.caption(first['full_path'])
+                                # Per-copy details: the hash that grouped these files,
+                                # plus size and modified time for every copy. In fast
+                                # mode a group is only a candidate duplicate (first 1 MB
+                                # + size), and unreadable files share the literal
+                                # 'ERROR' hash — both are visible here before any move.
+                                shown = group.copy()
+                                shown['hash'] = shown[hash_col].map(_short_hash)
+                                cols = ['full_path', 'size_human', 'hash']
+                                if 'modified_at' in shown.columns:
+                                    cols.append('modified_at')
+                                st.dataframe(
+                                    shown[cols],
+                                    hide_index=True,
+                                    column_config={
+                                        'full_path': st.column_config.TextColumn("Path"),
+                                        'size_human': st.column_config.TextColumn("Size"),
+                                        'hash': st.column_config.TextColumn(hash_col.upper()),
+                                        'modified_at': st.column_config.TextColumn("Modified"),
+                                    },
+                                    width='stretch',
+                                )
                                 # Oldest file is kept by default
                                 keeper_default = int(group['modified_at_epoch'].idxmin())
                                 keeper = st.radio(
