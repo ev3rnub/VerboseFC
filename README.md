@@ -32,7 +32,8 @@ A local file discovery, indexing, and search tool with a [Streamlit](https://str
   counts of indexed files, FTS documents, search history and watch alerts
 - *Size & Composition*: donut charts of where the bytes live (FTS index vs.
   tables vs. indexes, via `dbstat`), file categories, content-extraction
-  coverage; top-extensions bar chart
+  coverage; top-extensions bar chart. Slices under 1% fold into one "Other"
+  with the labels kept inside the ring, so the charts stay readable
 - *Activity*: searches per day (line), most frequent queries (bar), indexed
   files modified in the last 90 days (area), watch alerts by type / per day
 - *Tables & Integrity*: row counts per table, storage per table/index,

@@ -1038,6 +1038,38 @@ def main():
             size_tab, activity_tab, tables_tab = st.tabs(
                 ["🧿 Size & Composition", "📈 Activity", "🧱 Tables & Integrity"])
 
+            def _consolidate_slices(rows, label_col: str, value_col: str,
+                                    min_pct: float = 1.0):
+                """Fold slices smaller than min_pct of the total into one 'Other'.
+
+                A pie with ~20 slivers stacks its outside labels into an
+                unreadable pile (and the legend runs off the chart) — which is
+                exactly what the raw per-table and per-category breakdowns do.
+                Keeps at least the 3 largest slices so tiny charts stay intact.
+                """
+                rows = sorted(rows, key=lambda r: -r[value_col])
+                total = sum(r[value_col] for r in rows) or 1
+                keep = [r for r in rows if r[value_col] / total * 100 >= min_pct]
+                rest = [r for r in rows if r not in keep]
+                if len(keep) < 3:
+                    keep = rows[:3]
+                    rest = rows[3:]
+                if rest:
+                    merged = {label_col: f"Other ({len(rest)})", value_col: sum(r[value_col] for r in rest)}
+                    keep.append(merged)
+                return keep
+
+            def _donut(rows, label_col: str, value_col: str, unit: str):
+                """Donut with one readable inside label per slice (no legend)."""
+                dfc = pd.DataFrame(rows)
+                # textposition/textinfo are go.Pie attributes, not px.pie kwargs —
+                # apply them to the trace after building the figure.
+                fig = px.pie(dfc, names=label_col, values=value_col, hole=0.45)
+                fig.update_traces(textposition='inside', textinfo='label+percent')
+                fig.update_layout(legend=dict(font=dict(size=10), orientation='h',
+                                              yanchor='bottom'))
+                st.plotly_chart(fig, width='stretch')
+
             with size_tab:
                 c1, c2 = st.columns(2)
                 with c1:
@@ -1054,11 +1086,10 @@ def main():
                                 buckets['Indexes'] += nbytes or 0
                             else:
                                 buckets[name] += nbytes or 0
-                        sdf = pd.DataFrame(
-                            [(k, v) for k, v in buckets.items() if v > 0],
-                            columns=['component', 'bytes'])
-                        fig = px.pie(sdf, names='component', values='bytes', hole=0.45)
-                        st.plotly_chart(fig, width='stretch')
+                        rows = [{'component': k, 'bytes': v}
+                                for k, v in buckets.items() if v > 0]
+                        _donut(_consolidate_slices(rows, 'component', 'bytes'),
+                               'component', 'bytes', 'bytes')
                     else:
                         fts_b = dbstats['fts_bytes']
                         used = max(dbstats['used_bytes'], 1)
@@ -1072,10 +1103,10 @@ def main():
                 with c2:
                     st.write("**File categories (count)**")
                     if dbstats['by_category']:
-                        cat = pd.DataFrame(dbstats['by_category'],
-                                           columns=['category', 'count', 'bytes'])
-                        st.plotly_chart(px.pie(cat, names='category', values='count', hole=0.4),
-                                        width='stretch')
+                        cat_rows = [{'category': c or '(none)', 'count': n}
+                                    for c, n, _b in dbstats['by_category']]
+                        _donut(_consolidate_slices(cat_rows, 'category', 'count'),
+                               'category', 'count', 'files')
                     else:
                         st.write("No indexed files yet.")
 
