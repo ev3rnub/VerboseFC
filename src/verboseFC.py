@@ -618,6 +618,98 @@ def main():
                                 "listed and actionable in this pass — the others are left alone.")
                         confirm = st.checkbox("✅ I confirm: move the selected duplicate copies",
                                               key="dup_confirm")
+                        # The Apply button lives next to the confirmation checkbox,
+                        # not at the bottom of a list that can run 100 groups long:
+                        # ticking the box then scrolling back down hunting for the
+                        # button was the old two-scroll-trip flow. Which groups are
+                        # ticked comes from session state (the group checkboxes are
+                        # drawn below), so Apply can still be disabled when nothing
+                        # is picked — st.session_state already holds them this run.
+
+                        pending_keys = [k for k in list(st.session_state.keys())
+                                        if k.startswith('dupgrp_') and st.session_state[k]]
+                        if pending_keys:
+                            n_copies = 0
+                            for g in dup_groups[:DUP_GROUPS_SHOWN]:
+                                if st.session_state.get(f"dupgrp_{_dup_group_key(g)}", False):
+                                    n_copies += len(g) - 1
+                            dest = ('trashed' if action == 'Move to Trash'
+                                    else 'moved to ' + backup_path)
+                            st.warning(f"{n_copies} duplicate copies in {len(pending_keys)} "
+                                       f"group(s) will be **{dest}**. The kept copy stays in place.")
+                        apply_clicked = st.button(
+                            "🚚 Apply to selected groups", type="primary",
+                            disabled=not confirm or not pending_keys, key="dup_apply")
+                        if pending_keys and not confirm:
+                            st.info("Tick the confirmation checkbox above to enable the action.")
+
+                        # Result of an apply that already reran the page: show it
+                        # here, above the (rebuilt) group list.
+                        apply_note = st.session_state.pop('dup_apply_note', None)
+                        if apply_note:
+                            moved, failed, messages = apply_note
+                            st.success(f"Done: {moved} moved, {failed} failed.")
+                            for m in messages[:50]:
+                                st.caption(m)
+
+                        def _apply_duplicate_groups():
+                            """Move the non-kept copies of every ticked group."""
+                            nonlocal df
+                            moved, failed = 0, 0
+                            messages = []
+                            for i, group in enumerate(dup_groups[:DUP_GROUPS_SHOWN]):
+                                gkey = _dup_group_key(group)
+                                if not st.session_state.get(f'dupgrp_{gkey}', False):
+                                    continue
+                                keeper_idx = st.session_state.get(f'dupkeep_{gkey}')
+                                labels = [int(x) for x in group.index.tolist()]
+                                # Resolve the radio value to a path. A label that
+                                # is stale (the frame changed since the radio was
+                                # drawn) resolves to no keeper at all.
+                                keeper_path = None
+                                if (keeper_idx is not None and int(keeper_idx) in labels
+                                        and int(keeper_idx) in df.index):
+                                    keeper_path = df.loc[int(keeper_idx), 'full_path']
+                                paths = [df.loc[idx, 'full_path'] for idx in group.index
+                                         if idx in df.index]
+                                targets, skip = duplicate_mover_targets(paths, keeper_path)
+                                if skip:
+                                    failed += 1
+                                    messages.append(f"SKIPPED ({skip}): {group['name'].iloc[0]}")
+                                    continue
+                                for path in targets:
+                                    try:
+                                        if action == "Move to Trash":
+                                            msg = move_to_trash(path)
+                                        else:
+                                            msg = backup_move(path, backup_path, str(root))
+                                        messages.append(msg)
+                                        moved += 1
+                                        # Filter, not drop(index=...): the row labels of
+                                        # the other groups stay valid for this pass.
+                                        df = df[df['full_path'] != path]
+                                    except Exception as e:
+                                        failed += 1
+                                        messages.append(f"FAILED: {path} — {e}")
+                            st.session_state['scan_results'] = df
+                            if moved or failed:
+                                # Rebuild the group list from the filtered frame and
+                                # carry the report across the rerun, so a trashed
+                                # copy never lingers in an expanded group. Keeper/act
+                                # selections are dropped only for groups that were
+                                # actually acted on (their row-label ids belong to
+                                # the pre-move frame); untouched groups keep their
+                                # tick and keeper choice.
+                                for g in dup_groups[:DUP_GROUPS_SHOWN]:
+                                    gk = _dup_group_key(g)
+                                    if st.session_state.get(f'dupgrp_{gk}', False):
+                                        for pfx in ('dupkeep_', 'dupgrp_'):
+                                            st.session_state.pop(pfx + gk, None)
+                                st.session_state['dup_apply_note'] = (moved, failed, messages)
+                                st.rerun()
+
+                        if apply_clicked:
+                            _apply_duplicate_groups()
 
                         # Shorten long digests so the per-copy table stays readable.
                         def _short_hash(h: str) -> str:
@@ -660,54 +752,6 @@ def main():
                                     key=f"dupkeep_{gkey}"
                                 )
                                 act = st.checkbox("Act on this group (move the other copies)", key=f"dupgrp_{gkey}")
-                                if act:
-                                    total_selected += n - 1
-
-                        if total_selected > 0:
-                            st.warning(f"{total_selected} duplicate copies will be **{('trashed' if action == 'Move to Trash' else 'moved to ' + backup_path)}**. The kept copy stays in place.")
-                            if not confirm:
-                                st.info("Tick the confirmation checkbox above to enable the action.")
-                            if st.button("🚚 Apply to selected groups", disabled=not confirm, type="primary"):
-                                moved, failed = 0, 0
-                                messages = []
-                                for i, group in enumerate(dup_groups[:DUP_GROUPS_SHOWN]):
-                                    gkey = _dup_group_key(group)
-                                    if not st.session_state.get(f'dupgrp_{gkey}', False):
-                                        continue
-                                    keeper_idx = st.session_state.get(f'dupkeep_{gkey}')
-                                    labels = [int(x) for x in group.index.tolist()]
-                                    # Resolve the radio value to a path. A label that
-                                    # is stale (the frame changed since the radio was
-                                    # drawn) resolves to no keeper at all.
-                                    keeper_path = None
-                                    if (keeper_idx is not None and int(keeper_idx) in labels
-                                            and int(keeper_idx) in df.index):
-                                        keeper_path = df.loc[int(keeper_idx), 'full_path']
-                                    paths = [df.loc[idx, 'full_path'] for idx in group.index
-                                             if idx in df.index]
-                                    targets, skip = duplicate_mover_targets(paths, keeper_path)
-                                    if skip:
-                                        failed += 1
-                                        messages.append(f"SKIPPED ({skip}): {group['name'].iloc[0]}")
-                                        continue
-                                    for path in targets:
-                                        try:
-                                            if action == "Move to Trash":
-                                                msg = move_to_trash(path)
-                                            else:
-                                                msg = backup_move(path, backup_path, str(root))
-                                            messages.append(msg)
-                                            moved += 1
-                                            # Filter, not drop(index=...): the row labels of
-                                            # the other groups stay valid for this pass.
-                                            df = df[df['full_path'] != path]
-                                        except Exception as e:
-                                            failed += 1
-                                            messages.append(f"FAILED: {path} — {e}")
-                                st.session_state['scan_results'] = df
-                                st.success(f"Done: {moved} moved, {failed} failed.")
-                                for m in messages[:50]:
-                                    st.caption(m)
 
                         st.divider()
                         st.subheader("Filename Collision (Same name, different content)")
