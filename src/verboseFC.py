@@ -333,10 +333,15 @@ def main():
                 placeholder="~/Documents or C:\\Users\\you",
                 help="Root directory to scan and index — type it, or use Browse…")
         with btn_col:
-            st.write("")
+            # The two empty writes used to push the button down beside the
+            # input overshot the label+input block, leaving Browse hanging
+            # below the text field. A bare st.button has no visible label row
+            # in this Streamlit (confirmed in its frontend bundle), so it only
+            # needs one spacer line — the same height as the "Base Path"
+            # label next to it — and nothing more.
             st.write("")
             browse_ok = True
-            if st.button("📁 Browse…", width='stretch',
+            if st.button("📁 Browse…", width='stretch', key="base_browse",
                          help="Opens the native Finder / Explorer folder picker"):
                 chosen = pick_folder_dialog(base_path_typed)
                 if chosen:
@@ -887,7 +892,9 @@ def main():
                 "Folder to watch", value=st.session_state['picked_watch'],
                 placeholder="~/Documents or C:\\Users\\you\\Downloads")
         with col2:
-            st.write("")
+            # One spacer line only: the text input next door has a label row
+            # and the bare button does not, so two spacers overshot and left
+            # Browse hanging below the field.
             st.write("")
             watch_browse_ok = True
             if st.button("📁 Browse…", width='stretch', key="watch_browse",
@@ -901,7 +908,7 @@ def main():
         if not watch_browse_ok:
             st.caption("Folder picker unavailable (no desktop session) — type the path instead.")
         with col3:
-            st.write("")
+            # One spacer line only, matching the Browse column above.
             st.write("")
             if st.button("➕ Add folder", width='stretch'):
                 p = get_resolved_path(new_watch) if new_watch else None
