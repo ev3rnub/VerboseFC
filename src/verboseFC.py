@@ -1065,9 +1065,26 @@ def main():
                 # textposition/textinfo are go.Pie attributes, not px.pie kwargs —
                 # apply them to the trace after building the figure.
                 fig = px.pie(dfc, names=label_col, values=value_col, hole=0.45)
-                fig.update_traces(textposition='inside', textinfo='label+percent')
-                fig.update_layout(legend=dict(font=dict(size=10), orientation='h',
-                                              yanchor='bottom'))
+                # Contrast pass: Plotly's default pie text is light gray and
+                # disappears on its own pastel slices (and Streamlit's dark theme
+                # puts a white strip behind the legend). Big slices get their name
+                # + percent in dark text; slices too small to hold text show only
+                # the percent, and the legend carries the names. texttemplate is
+                # per-point arrayOk, unlike textinfo — that's how we vary it.
+                total = sum(r[value_col] for r in rows) or 1
+                pcts = [r[value_col] / total * 100 for r in rows]
+                templates = ['%{{label}}<br>%{{percent:.1f}}%' if p >= 8 else '%{{percent:.1f}}%'
+                             for p in pcts]
+                fig.update_traces(
+                    textposition='inside',
+                    insidetextfont=dict(color='#111111', size=13),
+                    texttemplate=templates,
+                )
+                fig.update_layout(
+                    legend=dict(font=dict(size=11, color='#dddddd'),
+                                orientation='h', yanchor='bottom',
+                                bgcolor='rgba(0,0,0,0)'),
+                    paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig, width='stretch')
 
             with size_tab:
