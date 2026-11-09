@@ -251,6 +251,46 @@ def get_resolved_path(path_str: str) -> Path:
     expanded = os.path.expanduser(os.path.expandvars(path_str))
     return Path(expanded).resolve()
 
+
+def pick_folder_dialog(initial: str = "") -> Optional[str]:
+    """Open the native OS folder picker (Finder / Explorer / GTK) and return
+    the chosen path, or None if cancelled.
+
+    Streamlit runs in the browser and has no directory picker of its own, so
+    this borrows the OS-native one via tkinter — which ships with CPython on
+    Windows and macOS and needs no new dependency. The hidden root window is
+    destroyed right away so only the picker is visible. If tkinter (or a
+    display) is unavailable — headless server, Python without Tk — the caller
+    falls back to the plain text input."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception:
+        return None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes('-topmost', True)  # bring the picker in front of the browser
+        initialdir = None
+        if initial:
+            cand = get_resolved_path(initial)
+            if cand.is_dir():
+                initialdir = str(cand)
+        chosen = filedialog.askdirectory(
+            title="Choose the folder to scan",
+            initialdir=initialdir,
+            mustexist=True,
+        )
+        root.destroy()
+    except Exception:
+        try:
+            root.destroy()
+        except Exception:
+            pass
+        return None
+    # askdirectory returns '' on cancel; normalise separators for display.
+    return str(Path(chosen)) if chosen else None
+
 # --- Main App ---
 
 def main():
@@ -261,8 +301,33 @@ def main():
         st.header("Settings")
         # No default on purpose: prefilling "~" made the primary button start a
         # scan (and full-content index) of the user's entire home directory.
-        base_path = st.text_input("Base Path", value="", placeholder="~/Documents",
-                                  help="Root directory to scan and index")
+        # A native folder picker sits next to the text box: typing "~/..." is
+        # meaningless on Windows, and browsing removes the guesswork entirely.
+        # The text box stays as the fallback for headless runs where tkinter
+        # has no display (the picker button then disappears).
+        if 'picked_path' not in st.session_state:
+            st.session_state['picked_path'] = ""
+        path_col, btn_col = st.columns([5, 2])
+        with path_col:
+            base_path_typed = st.text_input(
+                "Base Path", value=st.session_state['picked_path'],
+                placeholder="~/Documents or C:\\Users\\you",
+                help="Root directory to scan and index — type it, or use Browse…")
+        with btn_col:
+            st.write("")
+            st.write("")
+            browse_ok = True
+            if st.button("📁 Browse…", width='stretch',
+                         help="Opens the native Finder / Explorer folder picker"):
+                chosen = pick_folder_dialog(base_path_typed)
+                if chosen:
+                    st.session_state['picked_path'] = chosen
+                    st.rerun()
+                elif not st.session_state['picked_path']:
+                    browse_ok = False
+        base_path = base_path_typed  # Streamlit already strips outer whitespace; do not strip inner/trailing-space paths like "My Folder "
+        if not browse_ok:
+            st.caption("Folder picker unavailable (no desktop session) — type the path instead.")
         max_depth = st.slider("Max Recursion Depth", 1, 10, 2)
         workers = st.slider("Parallel Workers", 1, 16, 4)
 
@@ -749,10 +814,30 @@ def main():
         if watcher is not None and not watcher.is_alive():
             st.session_state['watcher'] = watcher = None
 
-        col1, col2 = st.columns([3, 1])
+        # Same native folder picker as the sidebar Base Path: browse instead
+        # of typing, with the text box kept for typed paths and headless runs.
+        if 'picked_watch' not in st.session_state:
+            st.session_state['picked_watch'] = ""
+        col1, col2, col3 = st.columns([3, 1, 1])
         with col1:
-            new_watch = st.text_input("Folder to watch", placeholder="~/Documents or C:\\Users\\you\\Downloads")
+            new_watch = st.text_input(
+                "Folder to watch", value=st.session_state['picked_watch'],
+                placeholder="~/Documents or C:\\Users\\you\\Downloads")
         with col2:
+            st.write("")
+            st.write("")
+            watch_browse_ok = True
+            if st.button("📁 Browse…", width='stretch', key="watch_browse",
+                         help="Opens the native Finder / Explorer folder picker"):
+                chosen = pick_folder_dialog(new_watch)
+                if chosen:
+                    st.session_state['picked_watch'] = chosen
+                    st.rerun()
+                elif not st.session_state['picked_watch']:
+                    watch_browse_ok = False
+        if not watch_browse_ok:
+            st.caption("Folder picker unavailable (no desktop session) — type the path instead.")
+        with col3:
             st.write("")
             st.write("")
             if st.button("➕ Add folder", width='stretch'):

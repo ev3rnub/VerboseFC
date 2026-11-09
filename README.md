@@ -5,6 +5,7 @@ A local file discovery, indexing, and search tool with a [Streamlit](https://str
 ## Features
 
 **Scan controls**
+- **Base Path folder picker** — a 📁 Browse… button opens the native Finder / Explorer dialog to choose the scan root (no more typing paths; `~` still works if you prefer typing)
 - Pause / Resume / Cancel a running scan (runs in a background thread with live progress)
 - Configurable hashing: toggle MD5 and SHA256 independently, or enable **fast hashing** (first 1 MB only) for much faster duplicate detection on large files
 - **Persistent index** (toggle): the search index is kept in `~/.verbosefc/verbosefc_index.db` between sessions; unchanged files are skipped on re-scan. Turn it off for a fresh temporary index each session
@@ -26,7 +27,7 @@ A local file discovery, indexing, and search tool with a [Streamlit](https://str
   ring depth (1–4); hover shows MB and % of parent
 
 **Watch dashboard tab** (real-time folder monitoring)
-- Add/remove folders to watch; start/stop monitoring (watchdog)
+- Add/remove folders to watch — with the same 📁 Browse… native folder picker as the scan path; start/stop monitoring (watchdog)
 - Alerts for created / modified / deleted / moved files, persisted in the index database
 - Unacknowledged alert count on the tab badge; acknowledge or clear alerts
 
@@ -181,6 +182,11 @@ src/
 - The app binds `127.0.0.1` by default (`.streamlit/config.toml`) and has no
   authentication of any kind — treat any override as "anyone on this network
   can browse, open and trash the files this process can reach".
+- The 📁 Browse… folder picker (scan path and Watch tab) opens on the machine
+  running the Streamlit server, like Open/Reveal. On a headless server with no
+  desktop session it falls back to the plain text input with an explanatory
+  caption. It uses tkinter, which ships with standard Python on Windows and
+  macOS — no extra dependency.
 
 ## Running the tests
 
