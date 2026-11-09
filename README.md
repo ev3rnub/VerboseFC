@@ -171,7 +171,7 @@ src/
 - Ingestion rules (indexes, sourcetypes, extractions) live in the same database and apply to already-indexed files; they never touch the filesystem. `sourcetype add content="regex"` matches the detected MIME type (e.g. `text/plain`), not file content — use `extract add` for content-based rules.
 - The scan respects the max-depth setting; very large trees with a high depth can take a while — tune the **Parallel Workers** slider, enable **fast hashing**, or pause/cancel mid-scan.
 - Windows artifact files (`Thumbs.db`, `$desktop.ini`) and `.DS_Store` are skipped automatically.
-- The persistent index lives at `~/.verbosefc/verbosefc_index.db` (delete it to start clean). Watch alerts are stored in the same database and survive restarts.
+- The persistent index lives at `~/.verbosefc/verbosefc_index.db` — on Windows, `%USERPROFILE%\.verbosefc\verbosefc_index.db` (e.g. `C:\Users\you\.verbosefc\verbosefc_index.db`). Delete it to start clean. Watch alerts are stored in the same database and survive restarts.
 - Fast hashing compares the first 1 MB + file size — very rare false positives for files identical in their first megabyte.
 - PDF previews are embedded inline up to 20 MB.
 - Content extraction is capped per file (10 MB) and per extracted document
