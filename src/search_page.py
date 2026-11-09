@@ -116,8 +116,10 @@ div[data-testid="stSelectbox"] > div > [data-baseweb="select"] > div {
   font-size: 0.85rem;
 }
 /* Query bar: monospace, resizable vertically via the bottom-right drag
-   handle (Splunk-style multiline expansion) */
-textarea[data-testid="stTextAreaInput"] {
+   handle (Splunk-style multiline expansion). No data-testid on the
+   textarea in this Streamlit (it uses base-web's class), so target the
+   element directly — scoped to this page's markdown-injected CSS. */
+textarea {
   font-family: "SFMono-Regular", Menlo, Consolas, monospace;
   font-size: 0.9rem;
   line-height: 1.5;
@@ -128,16 +130,21 @@ textarea[data-testid="stTextAreaInput"] {
 /* ---- line-number gutter ----
    Streamlit strips <script> from markdown, so the numbers are rendered
    server-side: when the query bar is expanded, a markdown element holds
-   "1<br>2<br>…" and CSS floats it over the textarea's left edge. The
-   numbers are a pure indicator — never part of the query text. */
+   "1<br>2<br>…" and CSS floats it inside the textarea's own border box.
+   The numbers are a pure indicator — never part of the query text. */
 div[data-testid="stColumn"]:has(.vfc-gutter) {
   position: relative;
 }
+/* Float over the input frame itself (stTextAreaRootElement), not the
+   column: that box starts exactly at the textarea's border, so the
+   gutter sits inside the rounded outline and its numbers line up with
+   the text rows instead of hanging above/left of the box. */
 div[data-testid="stElementContainer"]:has(.vfc-gutter) {
   position: absolute;
-  top: 0;
-  left: 0;
-  height: 100%;
+  top: 1px;               /* textarea border width */
+  left: 1px;
+  bottom: 1px;
+  height: auto;
   z-index: 5;
   pointer-events: none;
 }
@@ -148,7 +155,7 @@ div[data-testid="stMarkdownContainer"]:has(.vfc-gutter) {
   width: 36px;
   height: 100%;
   box-sizing: border-box;
-  padding: 7px 8px 0 0;   /* 1px border + 6px textarea padding */
+  padding: 6px 8px 0 0;   /* matches the textarea's top padding below */
   text-align: right;
   font-family: "SFMono-Regular", Menlo, Consolas, monospace;
   font-size: 0.9rem;
@@ -156,11 +163,15 @@ div[data-testid="stMarkdownContainer"]:has(.vfc-gutter) {
   color: #9da7b1;
   background: rgba(128, 128, 128, .10);
   border-right: 1px solid rgba(128, 128, 128, .25);
+  border-top-left-radius: 4px;
   overflow: hidden;
 }
-/* indent the query text so it starts right of the gutter */
-div[data-testid="stColumn"]:has(.vfc-gutter) textarea[data-testid="stTextAreaInput"] {
+/* indent the query text so it starts right of the gutter; keep the same
+   top padding and line-height as the gutter so rows stay aligned */
+div[data-testid="stColumn"]:has(.vfc-gutter) textarea {
+  padding-top: 6px;
   padding-left: 44px;
+  line-height: 1.5;
 }
 </style>
 """
