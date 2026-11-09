@@ -1,4 +1,6 @@
 import os
+import sys
+import subprocess
 import time
 import hashlib
 import json
@@ -252,44 +254,60 @@ def get_resolved_path(path_str: str) -> Path:
     return Path(expanded).resolve()
 
 
+# Tk code that runs in a helper subprocess (see pick_folder_dialog). It must
+# not import anything from this app — it is deliberately self-contained so the
+# child starts fast and cannot crash on an unrelated import.
+_PICKER_SNIPPET = r"""
+import sys, tkinter as tk
+from tkinter import filedialog
+root = tk.Tk()
+root.withdraw()
+root.attributes('-topmost', True)  # bring the picker in front of the browser
+initialdir = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else None
+chosen = filedialog.askdirectory(
+    title="Choose the folder to scan",
+    initialdir=initialdir,
+    mustexist=True,
+)
+root.destroy()
+sys.stdout.write(chosen or '')
+"""
+
+
 def pick_folder_dialog(initial: str = "") -> Optional[str]:
     """Open the native OS folder picker (Finder / Explorer / GTK) and return
     the chosen path, or None if cancelled.
 
     Streamlit runs in the browser and has no directory picker of its own, so
     this borrows the OS-native one via tkinter — which ships with CPython on
-    Windows and macOS and needs no new dependency. The hidden root window is
-    destroyed right away so only the picker is visible. If tkinter (or a
-    display) is unavailable — headless server, Python without Tk — the caller
-    falls back to the plain text input."""
+    Windows and macOS and needs no new dependency.
+
+    The picker runs in a throwaway subprocess, NOT in this process: Streamlit
+    executes this script on a ScriptRunner thread, and Tk windows must be
+    created on the main thread — on macOS that aborts the whole server with
+    'NSWindow should only be instantiated on the main thread!'. A child
+    process has its own main thread, so the dialog is safe there. If tkinter
+    (or a display) is unavailable — headless server, Python without Tk — the
+    caller falls back to the plain text input."""
+    initialdir = ""
+    if initial:
+        cand = get_resolved_path(initial)
+        if cand.is_dir():
+            initialdir = str(cand)
     try:
-        import tkinter as tk
-        from tkinter import filedialog
-    except Exception:
-        return None
-    try:
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes('-topmost', True)  # bring the picker in front of the browser
-        initialdir = None
-        if initial:
-            cand = get_resolved_path(initial)
-            if cand.is_dir():
-                initialdir = str(cand)
-        chosen = filedialog.askdirectory(
-            title="Choose the folder to scan",
-            initialdir=initialdir,
-            mustexist=True,
+        proc = subprocess.run(
+            [sys.executable, "-c", _PICKER_SNIPPET, initialdir],
+            capture_output=True, text=True, timeout=300,  # generous: user thinks in the dialog
         )
-        root.destroy()
     except Exception:
-        try:
-            root.destroy()
-        except Exception:
-            pass
         return None
-    # askdirectory returns '' on cancel; normalise separators for display.
-    return str(Path(chosen)) if chosen else None
+    chosen = proc.stdout.strip()
+    if proc.returncode != 0 or not chosen:
+        # Non-zero exit usually means no Tk / no display; treat as cancelled
+        # so the UI keeps the text input instead of crashing.
+        return None
+    # Normalise separators for display (posixpath/ntpath match the child's OS).
+    return str(Path(chosen))
 
 # --- Main App ---
 
