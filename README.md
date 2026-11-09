@@ -103,7 +103,7 @@ A local file discovery, indexing, and search tool with a [Streamlit](https://str
 
 ## Getting started
 
-Requires Python 3.10+. Verified on Python 3.12 with Streamlit 1.66, pandas 3.1
+Requires Python 3.13+. Verified on Python 3.13 with Streamlit 1.66, pandas 3.1
 and watchdog 7 (`src/requirements.txt` lists the floors; the UI calls need
 Streamlit 1.50 or newer).
 

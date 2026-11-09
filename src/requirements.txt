@@ -1,4 +1,4 @@
-# Runtime dependencies. Verified on Python 3.12 with the versions listed at the
+# Runtime dependencies. Verified on Python 3.13 with the versions listed at the
 # bottom of this file; the floors are the oldest releases the app's API usage
 # allows (the UI calls pass width='stretch' to st.button / st.dataframe, which
 # needs Streamlit 1.50+).
