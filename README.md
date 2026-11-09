@@ -26,6 +26,18 @@ A local file discovery, indexing, and search tool with a [Streamlit](https://str
   centered on that folder; Up / Root buttons to navigate back out; adjustable
   ring depth (1–4); hover shows MB and % of parent
 
+**Database dashboard tab** (stats for the SQLite file behind the index)
+- Headline metrics: file size vs. actually-used pages, free space SQLite keeps
+  for reuse (`VACUUM` hint when it gets large), integrity check, journal mode;
+  counts of indexed files, FTS documents, search history and watch alerts
+- *Size & Composition*: donut charts of where the bytes live (FTS index vs.
+  tables vs. indexes, via `dbstat`), file categories, content-extraction
+  coverage; top-extensions bar chart
+- *Activity*: searches per day (line), most frequent queries (bar), indexed
+  files modified in the last 90 days (area), watch alerts by type / per day
+- *Tables & Integrity*: row counts per table, storage per table/index,
+  sidecar file sizes; read-only queries, so it never disturbs a running scan
+
 **Watch dashboard tab** (real-time folder monitoring)
 - Add/remove folders to watch — with the same 📁 Browse… native folder picker as the scan path; start/stop monitoring (watchdog)
 - Alerts for created / modified / deleted / moved files, persisted in the index database
@@ -141,6 +153,7 @@ src/
 ├── scheduled_runner.py   # cron/launchd entry point for scheduled searches
 ├── scan_runner.py        # ScanController — background scan with pause/resume/cancel, hash options
 ├── db.py                 # SearchDatabase — SQLite schema, FTS5 ops, watch alerts
+├── db_stats.py           # collect_db_stats — read-only DB footprint/activity stats for the Database tab
 ├── indexer.py            # FileIndexer — indexing pipeline (hash options, skip-unchanged, pause/cancel)
 ├── content_extractor.py  # ContentExtractor — text extraction & file categorization
 ├── search_engine.py      # SearchEngine — query parsing + full-text search

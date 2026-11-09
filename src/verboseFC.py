@@ -18,6 +18,7 @@ import streamlit.components.v1 as components
 
 from content_extractor import ContentExtractor
 from db import SearchDatabase
+from db_stats import collect_db_stats
 from indexer import FileIndexer
 from search_engine import SearchEngine, create_search_engine
 from scan_runner import ScanController, get_human_size
@@ -524,8 +525,8 @@ def main():
     new_runs = saved_store.unseen_runs(st.session_state.get('sched_seen_id', 0))
     search_label = f"🔍 Search ({new_runs})" if new_runs else "🔍 Search"
     ingest_store = st.session_state['ingest_store']
-    main_tab1, main_tab2, main_tab3, main_tab4, main_tab5 = st.tabs(
-        ["📁 File Explorer", search_label, "📥 Ingestion", "📊 Storage", alert_label]
+    main_tab1, main_tab2, main_tab3, main_tab4, main_tab6, main_tab5 = st.tabs(
+        ["📁 File Explorer", search_label, "📥 Ingestion", "📊 Storage", "🗄️ Database", alert_label]
     )
 
     # ==================== FILE EXPLORER ====================
@@ -954,6 +955,164 @@ def main():
                 st.write("No alerts yet. Start monitoring and change something in a watched folder.")
 
         alerts_section()
+
+    # ==================== DATABASE DASHBOARD ====================
+    with main_tab6:
+        st.subheader("🗄️ Database Dashboard")
+        st.caption(f"Stats for the SQLite file backing this session: `{db_path}`")
+
+        dbstats = collect_db_stats(db_path)
+        if not dbstats:
+            if Path(db_path).exists():
+                st.error("Could not read this database file — it may be corrupt. "
+                         "Check it with a SQLite tool, or delete it to rebuild the index.")
+            else:
+                st.info("The database file does not exist yet — run a scan with indexing on.")
+        else:
+            if st.button("🔄 Refresh stats"):
+                st.rerun()
+
+            # --- Headline metrics ---
+            d1, d2, d3, d4, d5 = st.columns(5)
+            d1.metric("File size", get_human_size(dbstats['file_bytes']))
+            d2.metric("Actual used", get_human_size(dbstats['used_bytes']),
+                      help="page_count minus freelist — the rest is reclaimed space SQLite keeps for reuse.")
+            d3.metric("Free (reusable)", get_human_size(dbstats['free_pages'] * dbstats['page_size']))
+            d4.metric("Integrity", str(dbstats['integrity']))
+            d5.metric("Journal mode", str(dbstats['journal_mode']))
+
+            rc = dbstats['row_counts']
+            r1, r2, r3, r4 = st.columns(4)
+            r1.metric("Indexed files", f"{rc.get('files', 0):,}")
+            r2.metric("FTS documents", f"{rc.get('content', 0):,}")
+            r3.metric("Search history", f"{rc.get('search_history', 0):,}")
+            r4.metric("Watch alerts", f"{rc.get('watch_alerts', 0):,}")
+
+            st.divider()
+
+            # --- Size composition: circle charts ---
+            size_tab, activity_tab, tables_tab = st.tabs(
+                ["🧿 Size & Composition", "📈 Activity", "🧱 Tables & Integrity"])
+
+            with size_tab:
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.write("**Where the bytes live**")
+                    if dbstats['per_object']:
+                        # Group per-object pages into logical buckets.
+                        buckets: Dict[str, int] = defaultdict(int)
+                        for name, nbytes in dbstats['per_object']:
+                            if name.startswith('content_') or name == 'content':
+                                buckets['FTS content index'] += nbytes or 0
+                            elif name.startswith('sqlite_autoindex'):
+                                buckets['Auto indexes'] += nbytes or 0
+                            elif name.startswith('idx_'):
+                                buckets['Indexes'] += nbytes or 0
+                            else:
+                                buckets[name] += nbytes or 0
+                        sdf = pd.DataFrame(
+                            [(k, v) for k, v in buckets.items() if v > 0],
+                            columns=['component', 'bytes'])
+                        fig = px.pie(sdf, names='component', values='bytes', hole=0.45)
+                        st.plotly_chart(fig, width='stretch')
+                    else:
+                        fts_b = dbstats['fts_bytes']
+                        used = max(dbstats['used_bytes'], 1)
+                        sdf = pd.DataFrame(
+                            [('FTS content index', fts_b), ('Other', max(used - fts_b, 0))],
+                            columns=['component', 'bytes'])
+                        st.plotly_chart(px.pie(sdf, names='component', values='bytes', hole=0.45),
+                                        width='stretch')
+                        st.caption("This Python's SQLite lacks the dbstat module — showing a coarse split.")
+
+                with c2:
+                    st.write("**File categories (count)**")
+                    if dbstats['by_category']:
+                        cat = pd.DataFrame(dbstats['by_category'],
+                                           columns=['category', 'count', 'bytes'])
+                        st.plotly_chart(px.pie(cat, names='category', values='count', hole=0.4),
+                                        width='stretch')
+                    else:
+                        st.write("No indexed files yet.")
+
+                st.write("**Top extensions by count**")
+                if dbstats['by_extension']:
+                    ext = pd.DataFrame(dbstats['by_extension'],
+                                       columns=['extension', 'count', 'bytes'])
+                    bar = px.bar(ext, x='extension', y='count', labels={'count': 'files'})
+                    st.plotly_chart(bar, width='stretch')
+
+                cc = dbstats['content_coverage']
+                if cc:
+                    st.write("**Content extraction coverage**")
+                    cov = pd.DataFrame(
+                        [('Text extracted', cc.get('1', 0)), ('Metadata only', cc.get('0', 0))],
+                        columns=['state', 'files'])
+                    st.plotly_chart(px.pie(cov, names='state', values='files', hole=0.5,
+                                           color_discrete_sequence=['#2ca02c', '#bbbbbb']),
+                                    width='stretch')
+
+            with activity_tab:
+                if dbstats['searches_by_day']:
+                    st.write("**Searches per day**")
+                    sdf = pd.DataFrame(dbstats['searches_by_day'], columns=['day', 'searches'])
+                    sdf['day'] = pd.to_datetime(sdf['day'])
+                    st.plotly_chart(px.line(sdf, x='day', y='searches',
+                                            labels={'searches': 'search runs'}),
+                                    width='stretch')
+                else:
+                    st.write("No search history yet.")
+
+                if dbstats['top_queries']:
+                    st.write("**Most frequent queries**")
+                    tq = pd.DataFrame(dbstats['top_queries'],
+                                      columns=['query', 'runs', 'avg_results'])
+                    st.plotly_chart(px.bar(tq, x='query', y='runs', orientation='h'),
+                                    width='stretch')
+
+                if dbstats['file_activity_by_day']:
+                    st.write("**Indexed files modified in the last 90 days**")
+                    fas = pd.DataFrame(dbstats['file_activity_by_day'], columns=['day', 'files'])
+                    fas['day'] = pd.to_datetime(fas['day'])
+                    st.plotly_chart(px.area(fas, x='day', y='files'), width='stretch')
+
+                if dbstats['alerts_by_type']:
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.write("**Watch alerts by event type**")
+                        abt = pd.DataFrame(dbstats['alerts_by_type'], columns=['event', 'count'])
+                        st.plotly_chart(px.bar(abt, x='event', y='count'), width='stretch')
+                    with c2:
+                        st.write("**Alerts per day**")
+                        abd = pd.DataFrame(dbstats['alerts_by_day'], columns=['day', 'count'])
+                        abd['day'] = pd.to_datetime(abd['day'])
+                        st.plotly_chart(px.line(abd, x='day', y='count'), width='stretch')
+
+            with tables_tab:
+                st.write("**Row counts per table**")
+                st.bar_chart(pd.Series(rc).sort_values(ascending=False))
+
+                if dbstats['per_object']:
+                    st.write("**Storage per table / index (MB)**")
+                    pos = [(n, (b or 0) / (1024 * 1024)) for n, b in dbstats['per_object'] if (b or 0) > 0]
+                    pos.sort(key=lambda t: -t[1])
+                    obj_df = pd.DataFrame(pos[:30], columns=['object', 'MB'])
+                    st.plotly_chart(px.bar(obj_df, x='object', y='MB', orientation='h'),
+                                    width='stretch')
+
+                if dbstats['sidecar_bytes']:
+                    st.write("**Sidecar files** (present next to the .db):")
+                    for suffix, nbytes in dbstats['sidecar_bytes'].items():
+                        st.caption(f"`{db_path}{suffix}` — {get_human_size(nbytes)}")
+
+                if rc.get('files', 0) > 0 and dbstats['free_pages'] * dbstats['page_size'] > 50 * 1024 * 1024:
+                    st.info(
+                        f"{get_human_size(dbstats['free_pages'] * dbstats['page_size'])} of the file "
+                        "is free space SQLite keeps for reuse after deletes. A one-time "
+                        "`VACUUM` (any SQLite tool) reclaims it.")
+
+                if dbstats['integrity'] != 'ok':
+                    st.error(f"quick_check reported: {dbstats['integrity']} — consider rebuilding the index.")
 
 
 if __name__ == "__main__":
