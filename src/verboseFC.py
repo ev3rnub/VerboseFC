@@ -1220,8 +1220,16 @@ def main():
                     pos = [(n, (b or 0) / (1024 * 1024)) for n, b in dbstats['per_object'] if (b or 0) > 0]
                     pos.sort(key=lambda t: -t[1])
                     obj_df = pd.DataFrame(pos[:30], columns=['object', 'MB'])
-                    st.plotly_chart(px.bar(obj_df, x='object', y='MB', orientation='h'),
-                                    width='stretch')
+                    # orientation='h' is silently ignored by Plotly v6+ (the
+                    # option was renamed), so the long object names piled up as
+                    # overlapping rotated x-labels with hairline bars. Passing
+                    # y=object / x=MB gives a true horizontal bar chart: each
+                    # object gets its own row, no rotated text to collide.
+                    fig = px.bar(obj_df, y='object', x='MB')
+                    fig.update_traces(marker_color='#6ea8dc')
+                    fig.update_layout(yaxis_title=None, xaxis_title='MB',
+                                      paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+                    st.plotly_chart(fig, width='stretch')
 
                 if dbstats['sidecar_bytes']:
                     st.write("**Sidecar files** (present next to the .db):")
