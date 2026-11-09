@@ -1080,7 +1080,9 @@ def main():
                 # per-point arrayOk, unlike textinfo — that's how we vary it.
                 total = sum(r[value_col] for r in rows) or 1
                 pcts = [r[value_col] / total * 100 for r in rows]
-                templates = ['%{{label}}<br>%{{percent:.1f}}%' if p >= 8 else '%{{percent:.1f}}%'
+                # These are plain strings, not f-strings: doubling the braces
+                # here is what rendered literal "%{{label}}" text on the chart.
+                templates = ['%{label}<br>%{percent:.1f}%' if p >= 8 else '%{percent:.1f}%'
                              for p in pcts]
                 fig.update_traces(
                     textposition='inside',
@@ -1147,9 +1149,19 @@ def main():
                     cov = pd.DataFrame(
                         [('Text extracted', cc.get('1', 0)), ('Metadata only', cc.get('0', 0))],
                         columns=['state', 'files'])
-                    st.plotly_chart(px.pie(cov, names='state', values='files', hole=0.5,
-                                           color_discrete_sequence=['#2ca02c', '#bbbbbb']),
-                                    width='stretch')
+                    covfig = px.pie(cov, names='state', values='files', hole=0.5,
+                                     color_discrete_sequence=['#2ca02c', '#bbbbbb'])
+                    # Same contrast pass as the donuts above: black in-slice and
+                    # legend text so nothing goes white-on-white or gray-on-pastel.
+                    covfig.update_traces(
+                        textposition='inside',
+                        insidetextfont=dict(color='#111111', size=13),
+                        texttemplate='%{percent:.1f}%')
+                    covfig.update_layout(
+                        legend=dict(font=dict(size=11, color='#dddddd'),
+                                    bgcolor='rgba(0,0,0,0)'),
+                        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+                    st.plotly_chart(covfig, width='stretch')
 
             with activity_tab:
                 if dbstats['searches_by_day']:
