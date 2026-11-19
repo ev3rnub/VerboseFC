@@ -23,7 +23,7 @@ from indexer import FileIndexer
 from search_engine import SearchEngine, create_search_engine
 from scan_runner import ScanController, get_human_size
 from file_actions import (open_path, reveal_path, move_to_trash, backup_move,
-                        duplicate_mover_targets)
+                        duplicate_mover_targets, move_files_out)
 from watcher import FolderWatcher
 from saved_searches import SavedSearchStore
 from search_page import render_search_tab
@@ -556,6 +556,24 @@ def main():
 
             with tab1:
                 st.subheader("All Files")
+
+                # Report from a "Move / delete" apply that already reran the
+                # page (handled at the bottom of this tab). Shown above the
+                # (already filtered) file list so a moved file never lingers
+                # in the table below its own result line.
+                mv_note = st.session_state.pop('mv_apply_note', None)
+                if mv_note:
+                    n_moved, n_gone, n_failed, mv_messages = mv_note
+                    if n_failed:
+                        st.error(f"Done: {n_moved} moved, {n_gone} already "
+                                 f"missing, {n_failed} FAILED — failed and "
+                                 "missing files were left untouched.")
+                    else:
+                        st.success(f"Done: {n_moved} moved, {n_gone} already "
+                                   f"missing — nothing failed.")
+                    for m in mv_messages[:50]:
+                        st.caption(m)
+
                 st.dataframe(df, width='stretch')
 
                 csv = df.to_csv(index=False).encode('utf-8')
@@ -582,6 +600,91 @@ def main():
                                 st.success(f"Revealed: {selected}")
                             except Exception as e:
                                 st.error(f"Could not reveal: {e}")
+
+                st.divider()
+                st.subheader("🧹 Move / Delete Selected Files")
+                st.caption(
+                    "Pick any indexed files and move them out of the way — into the OS "
+                    "Trash or into a backup folder. A file that leaves its folder also "
+                    "leaves the search index, so it stops showing up in the Search tab "
+                    "and in the Duplicates view. Files that are missing or cannot be "
+                    "moved keep their index rows."
+                )
+
+                mv_action = st.radio(
+                    "Action on the selected files",
+                    ["Move to Trash", "Move to backup folder"],
+                    horizontal=True,
+                    key="mover_action",
+                    help="Trash uses the OS Recycle Bin / Trash (empty it to delete "
+                         "for good). Backup copies each file into a folder — relative "
+                         "paths under the scan root are preserved — and then removes "
+                         "the original."
+                )
+                mv_backup = ""
+                if mv_action == "Move to backup folder":
+                    mv_backup = st.text_input(
+                        "Backup folder", value="~/verbosefc_backups", key="mover_backup",
+                        help="Chosen files are copied here (relative paths preserved), "
+                             "then the originals are removed."
+                    )
+
+                # The list can run into the six figures; a searchable picker
+                # beats a plain scroll list once the index grows past a screenful.
+                mv_files = st.multiselect(
+                    "Files to move or delete", options, key="mover_files",
+                    placeholder="Search the list, then pick the files to act on…")
+
+                # Same guard as the Duplicates section: the Apply button sits
+                # next to the confirmation checkbox and stays dead until there
+                # is both a tick and a non-empty selection, so no accidental
+                # click can empty a folder.
+                mv_left, mv_right = st.columns([2.2, 1])
+                with mv_left:
+                    mv_confirm = st.checkbox(
+                        "✅ I confirm: move the selected files (they leave the index too)",
+                        key="mover_confirm", disabled=not mv_files)
+                with mv_right:
+                    st.write("")
+                    mv_apply = st.button(
+                        "🚚 Apply to selected files", type="primary", key="mover_apply",
+                        width='stretch', disabled=not (mv_files and mv_confirm))
+                if mv_files and not mv_confirm:
+                    st.info("Tick the confirmation checkbox to enable the action.")
+
+                if mv_files and mv_apply:
+                    paths = list(dict.fromkeys(mv_files))  # dedupe, keep order
+                    results = move_files_out(
+                        paths,
+                        "trash" if mv_action == "Move to Trash" else "backup",
+                        mv_backup or "~/verbosefc_backups",
+                        str(root),
+                    )
+                    moved = [p for p, s, _ in results if s == "moved"]
+                    n_gone = sum(1 for _, s, _ in results if s == "missing")
+                    n_failed = len(results) - len(moved) - n_gone
+                    if moved:
+                        # Rows that left the disk leave the results frame too
+                        # (filtered, not dropped by label — the Duplicates
+                        # precedent) and leave the search index: the index is a
+                        # snapshot of the disk, and a file that left the disk
+                        # must not stay findable. Missing and failed files keep
+                        # their rows — the disk may be unmounted, or the file
+                        # merely locked; that is not grounds to forget it.
+                        st.session_state['scan_results'] = df = \
+                            df[~df['full_path'].isin(moved)]
+                        for p in moved:
+                            try:
+                                db.delete_file_by_path(p)
+                            except Exception:
+                                pass  # a stale index row is cosmetic; a wrong delete is not
+                    st.session_state['mv_apply_note'] = (
+                        len(moved), n_gone, n_failed, [m for _, _, m in results])
+                    # Forget the applied pick: a trashed path must not stay
+                    # selectable next render, and a new batch needs a fresh tick.
+                    st.session_state.pop('mover_files', None)
+                    st.session_state.pop('mover_confirm', None)
+                    st.rerun()
 
             with tab2:
                 # Pick the best available hash column for duplicate detection
