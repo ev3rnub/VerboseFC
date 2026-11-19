@@ -88,3 +88,4 @@ temp/
 # --- App-specific: local search index databases ---
 *.db
 verboseFC_*.db
+IDEA.md
