@@ -35,6 +35,45 @@ def duplicate_mover_targets(group_paths, keeper_path):
     return [p for p in group_paths if p != keeper_path], None
 
 
+def move_files_out(file_paths, action, backup_root=None, scan_root=None):
+    """Move a batch of user-picked files out of the way in one pass.
+
+    This is the engine behind the File List tab's "Move / Delete Selected
+    Files" section: any indexed file the user selects (not just members of a
+    duplicate group) can be sent to the OS Trash or backup-moved.
+
+    action: "trash" sends each file to the OS Trash (send2trash); anything
+    else backup-moves it into backup_root, mirroring path fragments under
+    scan_root (same placement rule as backup_move).
+
+    Returns [(path, status, message), ...] with status one of:
+      "moved"   - the file left its original location
+      "missing" - the file was already gone (nothing to move, nothing lost)
+      "failed"  - the file exists but could not be moved (unreadable, no
+                  Trash, ...). One bad file never aborts the batch.
+    """
+    results = []
+    for path in file_paths:
+        try:
+            if action == "trash":
+                msg = move_to_trash(path)
+            elif not backup_root:
+                # No destination configured: refuse instead of scattering
+                # copies around whatever folder the app happens to run from.
+                results.append((path, "failed",
+                                f"FAILED: {path} — no backup folder selected"))
+                continue
+            else:
+                msg = backup_move(path, backup_root, scan_root)
+            if msg.startswith("SKIP"):
+                results.append((path, "missing", msg))
+            else:
+                results.append((path, "moved", msg))
+        except Exception as e:
+            results.append((path, "failed", f"FAILED: {path} — {e}"))
+    return results
+
+
 def open_path(file_path: str) -> None:
     """Open a file or folder with its default application."""
     p = str(Path(file_path))

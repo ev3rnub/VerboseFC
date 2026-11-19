@@ -20,7 +20,7 @@
 
 ## 2. Test suite
 
-All seven test files are **plain scripts, not pytest**: run `python test_<name>.py`
+All eight test files are **plain scripts, not pytest**: run `python test_<name>.py`
 from `src/` (they rely on same-directory imports); success prints `OK` / check
 lines, failures raise or `sys.exit(1)`. No test framework dependency.
 
@@ -33,11 +33,13 @@ lines, failures raise or `sys.exit(1)`. No test framework dependency.
 | `test_gutter.py` (79 L) | Streamlit `AppTest` headless test of the search-bar line-number gutter in `search_page.render_search_tab` (absent at `q_area_h==44`, `<div class="vfc-gutter">1</div>` expanded, `1<br>2<br>3` for 3-line query, query text never mutated, disappears on collapse; `FakeDB`/`FakeStore`). |
 | `test_integration.py` (121 L) | End-to-end smoke: `ScanController` + `FileIndexer.index_files(skip_unchanged=True)` single walk (4 files, one sha256 duplicate group, md5 disabled → empty); re-scan `skipped=4/indexed=0`; fast hashing (`fast_limit=1024`); cancel mid-scan → partial results + status `cancelled`; pause/resume completes 600 files; `add_alert`/`acknowledge_all_alerts`; `FolderWatcher` fires a `created` event; `backup_move` mirrors relative path and deletes the original. |
 | `test_regressions.py` (171 L) | The 11/05 fixes, 7 numbered `check()`s (exit 1 on failure): numeric query can't match `file_id` (UNINDEXED); legacy FTS table rebuilt in place (rows kept, false positive gone); content size cap enforced (`content_available==0`, `content_skipped==1`); archive member count cap (`MAX_ARCHIVE_ENTRIES`) + per-member read cap (`ARCHIVE_MEMBER_READ_BYTES`); single-file text read bounded at `MAX_CONTENT_CHARS` even with `max_content_size=0`; `duplicate_mover_targets` refuses to move everything without a valid keeper; `get_all_files_meta` omits `content_preview`. |
-Seven files total; the table above covers all of them.
+| `test_fileops.py` (116 L) | `file_actions.move_files_out` batch mover: mirrored backup paths, missing files reported instead of moved, one unreadable file does not abort the batch, empty backup destination refuses to move, Trash action guarded where send2trash is available; plus `db.delete_file_by_path` — the index-row purge the File List applies to moved files. |
+Eight files total; the table above covers all of them.
 
 When changing engine code, at minimum run `test_vpl.py`, `test_ingestion.py`,
-`test_saved.py`, `test_regressions.py`, `test_integration.py` (the last touches
-real filesystems in temp dirs and watchdog).
+`test_saved.py`, `test_regressions.py`, `test_integration.py` and `test_fileops.py`
+(the last four touch real filesystems in temp dirs; `test_integration.py` also
+exercises watchdog).
 
 ## 3. Known quirks, dead code & documented defects
 

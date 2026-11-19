@@ -14,6 +14,7 @@ A local file discovery, indexing, and search tool with a [Streamlit](https://str
 **File Explorer tab**
 - Recursive directory scan with configurable max depth and parallel workers
 - **Duplicates view** — files with identical content, grouped; each group expands to a per-copy table (path, size, hash, modified time) so you can verify the match — including fast-mode candidates and `ERROR` hashes from unreadable files — before acting. Pick which copy to keep and **move the rest to the OS Trash** (Recycle Bin on Windows) or **move them to a backup folder** (relative paths preserved), with a confirmation step
+- **Move / delete selected files** — pick any indexed files (not just duplicate copies) in a searchable file picker and **move them to the OS Trash** (Recycle Bin on Windows) or **move them to a backup folder** (relative paths preserved), behind the same confirm-checkbox + Apply pattern as the Duplicates view. A file that moves is also dropped from the search index, so it stops haunting the Search tab and the duplicate groups
 - **Filename collisions view** — same name, different content
 - Directory tree view, CSV report download
 - **Open** / **Reveal in Finder / Explorer** for any file (cross-platform)
@@ -214,5 +215,6 @@ python test_saved.py          # saved & scheduled searches
 python test_gutter.py         # search query-bar line gutter
 python test_integration.py    # end-to-end: index → search → duplicates
 python test_regressions.py    # size caps, FTS migration, duplicate keeper guard
+python test_fileops.py        # batch move/delete of selected files + index-row purge
 ```
 - Open/Reveal launch native apps on the machine running the Streamlit server (fine for local use; not over a remote browser).

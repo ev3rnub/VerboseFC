@@ -85,7 +85,20 @@ Cold-start hydration (L539–548): no `scan_results` but DB has files → load
 (`ValueError` on mixed Windows drives → skip).
 Sub-tabs `["📄 File List", "👯 Duplicates", "🌳 Tree View"]`.
 - File List: `st.dataframe(df, width='stretch')` + "Download CSV Report";
-  "🗂 File Actions" selectbox + **📂 Open file** / **📍 Reveal in Finder / Explorer**.
+  "🗂 File Actions" selectbox + **📂 Open file** / **📍 Reveal in Finder / Explorer**
+  (single file; the buttons disappear until one is picked). Below that, the
+  **🧹 Move / Delete Selected Files** section: action radio (Trash / backup folder,
+  `mover_action`), optional backup-folder text (`mover_backup`, default
+  `~/verbosefc_backups`), `st.multiselect` over `df['full_path']` (`mover_files`),
+  confirm checkbox (`mover_confirm`) and **🚚 Apply to selected files** (`mover_apply`,
+  disabled until both tick and non-empty selection). Apply runs
+  `file_actions.move_files_out` (Trash or `backup_move`; one bad file never aborts
+  the batch), then filters the moved paths out of the results frame (filter, not
+  drop-by-label) and purges their index rows via `db.delete_file_by_path` — files
+  that were missing or failed keep their rows (unmounted volumes, locked files).
+  The `(moved, missing, failed, messages)` report rides to the next render in
+  `mv_apply_note` and prints above the table; `mover_files`/`mover_confirm` are
+  popped on apply so the next batch needs a fresh pick + tick.
 - Duplicates (L586–769): hash column preference **sha256 → md5** (first with any
   non-empty value). `fast_hash_used` ⇒ group key = `[hash_col, 'size_bytes']` and a
   false-positive caveat note. Action radio `["Move to Trash","Move to backup folder"]`
@@ -157,7 +170,9 @@ VACUUM hint when free space > 50 MB and rows exist, `st.error` when
 `picked_path, scan_controller, fast_hash_used, db_holder, db_path, db, indexer_key,
 indexer, search_engine, scan_results, scan_root, index_stats, diskmap_path,
 diskmap_depth, diskmap_drill, dup_confirm, dup_apply, dup_apply_note,
-dupkeep_<gkey>, dupgrp_<gkey>, saved_store, ingest_store, store_db_path,
+dupkeep_<gkey>, dupgrp_<gkey>, mover_action, mover_backup, mover_files,
+mover_confirm, mover_apply, mv_apply_note, saved_store, ingest_store,
+store_db_path,
 sched_seen_id, watcher, watch_paths, picked_watch, alerts_only_pending`.
 
 ## 2. `search_page.py` — the Search tab
